@@ -68,9 +68,9 @@ pub fn desired_widget_size(state: &AppState) -> Vec2 {
     Vec2::new(w.clamp(110.0, 1000.0), h.clamp(60.0, 2000.0))
 }
 
-pub fn apply_tray_only_visibility(ctx: &egui::Context, state: &mut AppState) {
-    let tray_only = state.config.tray_only;
-    if tray_only {
+pub fn apply_minimized_visibility(ctx: &egui::Context, state: &mut AppState) {
+    let minimized = state.minimized_to_tray;
+    if minimized {
         crate::ui::tooltip::hide();
         state.main_outer_rect = None;
         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MousePassthrough(true));
@@ -202,10 +202,14 @@ pub fn handle_menu_action(
                 }),
             );
         }
-        NativeMenuAction::ToggleTrayOnly => {
-            state.config.tray_only = !state.config.tray_only;
+        NativeMenuAction::ToggleHideTaskbar => {
+            state.config.hide_taskbar = !state.config.hide_taskbar;
             crate::config::save_config(&state.config);
-            apply_tray_only_visibility(ctx, state);
+            crate::platform::set_skip_taskbar(state.config.hide_taskbar);
+        }
+        NativeMenuAction::ToggleMinimize => {
+            state.minimized_to_tray = !state.minimized_to_tray;
+            apply_minimized_visibility(ctx, state);
         }
         NativeMenuAction::ImportCsv => {
             let path = crate::config::network_csv_path();
@@ -412,37 +416,49 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
 
     let mut current_y = rect.top() + 1.0;
 
-    // ==== 4. Верхняя панель гаджета (22px) ====
+    // ==== 4. Верхняя панель гаджета (22px): слева обновление + заголовок, справа свернуть и закрыть ====
     let bar_height = 22.0;
     let bar_rect = Rect::from_min_size(
         Pos2::new(rect.left() + 1.0, current_y),
         Vec2::new(width - 2.0, bar_height),
     );
 
-    // Перетаскивание окна за шапку (только ЛКМ)
-    let bar_resp = ui.interact(bar_rect, ui.scope_id().with("gadget_top_drag"), Sense::click_and_drag());
-    if bar_resp.drag_started_by(egui::PointerButton::Primary) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        state.is_user_dragging_window = true;
-    }
-
-    // Заголовок слева (всегда "Netmon Widget"; активный опрос показывает иконка вращения)
-    ui.painter().text(
-        Pos2::new(bar_rect.left() + 9.0, bar_rect.center().y),
-        Align2::LEFT_CENTER,
-        "Netmon Widget",
-        FontId::proportional(11.0),
-        pal.title_blue,
-    );
-
-    // Кнопка обновления справа: вращающаяся/статичная круговая стрелочка
-    let refresh_center = Pos2::new(bar_rect.right() - 12.0, bar_rect.center().y);
+    // Кнопка обновления слева: вращающаяся/статичная круговая стрелочка
+    let refresh_center = Pos2::new(bar_rect.left() + 12.0, bar_rect.center().y);
     let refresh_rect = Rect::from_center_size(refresh_center, Vec2::splat(16.0));
     let refresh_resp = ui.interact(refresh_rect, ui.scope_id().with("gadget_refresh_btn"), Sense::click());
     if refresh_resp.clicked() {
         state.manual_refresh_requested = true;
     }
-    let refresh_hovered = refresh_resp.hovered();
+
+    // Кнопки управления окном справа: Свернуть (—) и Закрыть (×)
+    let close_center = Pos2::new(bar_rect.right() - 11.0, bar_rect.center().y);
+    let close_rect = Rect::from_center_size(close_center, Vec2::splat(15.0));
+    let close_resp = ui.interact(close_rect, ui.scope_id().with("gadget_close_btn"), Sense::click());
+    if close_resp.clicked() {
+        crate::config::save_config(&state.config);
+        state.uptime_history.force_save();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    let min_center = Pos2::new(bar_rect.right() - 27.0, bar_rect.center().y);
+    let min_rect = Rect::from_center_size(min_center, Vec2::splat(15.0));
+    let min_resp = ui.interact(min_rect, ui.scope_id().with("gadget_minimize_btn"), Sense::click());
+    if min_resp.clicked() {
+        state.minimized_to_tray = true;
+        apply_minimized_visibility(&ctx, state);
+    }
+
+    // Перетаскивание окна за свободную область шапки между кнопками (только ЛКМ)
+    let drag_rect = Rect::from_min_max(
+        Pos2::new(refresh_rect.right() + 1.0, bar_rect.top()),
+        Pos2::new((min_rect.left() - 1.0).max(refresh_rect.right() + 2.0), bar_rect.bottom()),
+    );
+    let bar_resp = ui.interact(drag_rect, ui.scope_id().with("gadget_top_drag"), Sense::click_and_drag());
+    if bar_resp.drag_started_by(egui::PointerButton::Primary) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        state.is_user_dragging_window = true;
+    }
 
     let rotation_angle = if state.is_checking {
         ui.input(|i| (i.time * 8.0) as f32)
@@ -454,11 +470,56 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         refresh_center,
         4.5,
         rotation_angle,
-        if refresh_hovered {
+        if refresh_resp.hovered() {
             pal.refresh_hover
         } else {
             pal.refresh_idle
         },
+    );
+
+    // Заголовок после кнопки обновления, обрезается при узком окне перед кнопками справа
+    let title_text = truncate_text("Netmon Widget", (drag_rect.width() - 4.0).max(8.0), 11.0);
+    ui.painter().with_clip_rect(drag_rect).text(
+        Pos2::new(drag_rect.left() + 2.0, bar_rect.center().y),
+        Align2::LEFT_CENTER,
+        title_text,
+        FontId::proportional(11.0),
+        pal.title_blue,
+    );
+
+    // Иконка "Свернуть в трей" (—)
+    let min_color = if min_resp.hovered() {
+        pal.refresh_hover
+    } else {
+        pal.refresh_idle
+    };
+    ui.painter().line_segment(
+        [
+            Pos2::new(min_center.x - 3.5, min_center.y + 1.5),
+            Pos2::new(min_center.x + 3.5, min_center.y + 1.5),
+        ],
+        Stroke::new(1.5, min_color),
+    );
+
+    // Иконка "Закрыть" (×)
+    let close_color = if close_resp.hovered() {
+        Color32::from_rgb(0xFF, 0x6B, 0x6B)
+    } else {
+        pal.refresh_idle
+    };
+    ui.painter().line_segment(
+        [
+            Pos2::new(close_center.x - 3.2, close_center.y - 3.2),
+            Pos2::new(close_center.x + 3.2, close_center.y + 3.2),
+        ],
+        Stroke::new(1.5, close_color),
+    );
+    ui.painter().line_segment(
+        [
+            Pos2::new(close_center.x + 3.2, close_center.y - 3.2),
+            Pos2::new(close_center.x - 3.2, close_center.y + 3.2),
+        ],
+        Stroke::new(1.5, close_color),
     );
 
     current_y += bar_height;
@@ -701,7 +762,8 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             state.config.language,
                             is_dark,
                             state.config.always_on_top,
-                            state.config.tray_only,
+                            state.minimized_to_tray,
+                            state.config.hide_taskbar,
                             state.config.interval_sec,
                             crate::ui::menu::native::MenuTarget::Check {
                                 sec_idx: si,
@@ -716,7 +778,8 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             state.config.language,
                             is_dark,
                             state.config.always_on_top,
-                            state.config.tray_only,
+                            state.minimized_to_tray,
+                            state.config.hide_taskbar,
                             state.config.interval_sec,
                             crate::ui::menu::native::MenuTarget::Section {
                                 sec_idx: si,
@@ -728,7 +791,8 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             state.config.language,
                             is_dark,
                             state.config.always_on_top,
-                            state.config.tray_only,
+                            state.minimized_to_tray,
+                            state.config.hide_taskbar,
                             state.config.interval_sec,
                             crate::ui::menu::native::MenuTarget::EmptyArea,
                         )

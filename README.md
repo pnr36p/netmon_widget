@@ -28,7 +28,7 @@ A lightweight desktop network monitoring widget for Windows inspired by the clas
   - Double-click any host row to edit it.
   - Right-click context menu: **Edit**, **Clone...**, **Add host / group**, **Refresh now**, **Global poll interval** submenu, **Always on top**.
   - Live drag-and-drop reordering for both hosts and groups.
-  - Tray icon menu on left/right click plus **Show tray icon only** mode (hides the desktop widget window).
+  - Tray icon menu on left/right click, **Minimize to tray** (`—`) / **Close** (`×`) header buttons, and **Hide window from taskbar** option..
 - **Per-host polling intervals & portable multi-instance support:**
   - Optional per-host `interval_sec` overriding the global polling interval.
   - Size presets (`XS`/`S`/`M`/`L`/`XL`), free mouse width resizing, and background opacity slider.

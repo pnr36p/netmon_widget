@@ -675,11 +675,12 @@ unsafe fn run_tray(
         if msg.message == WM_APP + 1 || msg.message == WM_APP + 2 {
             let lparam = msg.l_param as u32;
             if lparam == WM_LBUTTONUP || lparam == WM_RBUTTONUP {
-                let (aot, tray_only, lang, is_dark, interval_sec) = {
+                let (aot, minimized, hide_taskbar, lang, is_dark, interval_sec) = {
                     let st = state.lock().unwrap();
                     (
                         st.config.always_on_top,
-                        st.config.tray_only,
+                        st.minimized_to_tray,
+                        st.config.hide_taskbar,
                         st.config.language,
                         st.config.theme.resolve_is_dark(),
                         st.config.interval_sec,
@@ -689,7 +690,8 @@ unsafe fn run_tray(
                     lang,
                     is_dark,
                     aot,
-                    tray_only,
+                    minimized,
+                    hide_taskbar,
                     interval_sec,
                     crate::ui::menu::native::MenuTarget::Tray,
                 ) {
@@ -699,9 +701,13 @@ unsafe fn run_tray(
                     }
                 }
             } else if lparam == WM_LBUTTONDBLCLK {
-                let _ = tx.send(TrayCommand::Menu(
-                    crate::ui::menu::native::NativeMenuAction::Settings,
-                ));
+                let minimized = state.lock().unwrap().minimized_to_tray;
+                let act = if minimized {
+                    crate::ui::menu::native::NativeMenuAction::ToggleMinimize
+                } else {
+                    crate::ui::menu::native::NativeMenuAction::Settings
+                };
+                let _ = tx.send(TrayCommand::Menu(act));
                 if let Some(c) = egui_ctx.lock().unwrap().as_ref() {
                     c.request_repaint();
                 }

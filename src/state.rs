@@ -151,6 +151,7 @@ pub struct AppState {
     pub last_history_save: std::time::Instant,
     pub autostart_enabled: bool,
     pub autostart_error: Option<String>,
+    pub minimized_to_tray: bool,
     pub pending_notifications: std::collections::VecDeque<TrayNotification>,
 }
 
@@ -202,6 +203,7 @@ impl AppState {
             last_history_save: std::time::Instant::now(),
             autostart_enabled: crate::platform::is_autostart_enabled(),
             autostart_error: None,
+            minimized_to_tray: false,
             pending_notifications: std::collections::VecDeque::new(),
         }
     }

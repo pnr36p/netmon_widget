@@ -467,7 +467,8 @@ pub mod native {
         Refresh,
         Settings,
         ToggleAlwaysOnTop,
-        ToggleTrayOnly,
+        ToggleHideTaskbar,
+        ToggleMinimize,
         ImportCsv,
         EditConfig,
         Close,
@@ -535,7 +536,8 @@ pub mod native {
         lang: Language,
         is_dark: bool,
         always_on_top: bool,
-        tray_only: bool,
+        minimized: bool,
+        hide_taskbar: bool,
         interval_sec: u64,
         target: MenuTarget<'_>,
     ) -> Option<NativeMenuAction> {
@@ -614,7 +616,19 @@ pub mod native {
                     mb.add_item(hmenu, s.menu_add_group, false, NativeMenuAction::AddGroup);
                     mb.add_sep(hmenu);
                 }
-                MenuTarget::Tray => {}
+                MenuTarget::Tray => {
+                    mb.add_item(
+                        hmenu,
+                        if minimized {
+                            s.menu_restore_from_tray
+                        } else {
+                            s.menu_minimize_to_tray
+                        },
+                        false,
+                        NativeMenuAction::ToggleMinimize,
+                    );
+                    mb.add_sep(hmenu);
+                }
             }
 
             mb.add_item(hmenu, s.menu_refresh, false, NativeMenuAction::Refresh);
@@ -649,14 +663,22 @@ pub mod native {
             );
             mb.add_item(
                 hmenu,
-                s.menu_tray_only,
-                tray_only,
-                NativeMenuAction::ToggleTrayOnly,
+                s.menu_hide_taskbar,
+                hide_taskbar,
+                NativeMenuAction::ToggleHideTaskbar,
             );
             mb.add_sep(hmenu);
             mb.add_item(hmenu, s.menu_import_csv, false, NativeMenuAction::ImportCsv);
             mb.add_item(hmenu, s.menu_edit_config, false, NativeMenuAction::EditConfig);
             mb.add_sep(hmenu);
+            if !matches!(target, MenuTarget::Tray) {
+                mb.add_item(
+                    hmenu,
+                    s.menu_minimize_to_tray,
+                    false,
+                    NativeMenuAction::ToggleMinimize,
+                );
+            }
             mb.add_item(hmenu, s.menu_close_app, false, NativeMenuAction::Close);
 
             let bg_brush = CreateSolidBrush(if is_dark {

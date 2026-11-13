@@ -163,10 +163,10 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                     );
                 }
 
-                let mut tray_only = state.config.tray_only;
-                if ui.checkbox(&mut tray_only, s.settings_tray_only).changed() {
-                    state.config.tray_only = tray_only;
-                    crate::ui::widget::apply_tray_only_visibility(ui.ctx(), state);
+                let mut hide_taskbar = state.config.hide_taskbar;
+                if ui.checkbox(&mut hide_taskbar, s.settings_hide_taskbar).changed() {
+                    state.config.hide_taskbar = hide_taskbar;
+                    crate::platform::set_skip_taskbar(hide_taskbar);
                     save_config(&state.config);
                 }
 

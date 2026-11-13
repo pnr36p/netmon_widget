@@ -21,7 +21,7 @@ struct NetmonApp {
     trigger_tx: tokio::sync::mpsc::UnboundedSender<()>,
     cfg_tx: tokio::sync::watch::Sender<crate::config::AppConfig>,
     tray_rx: mpsc::Receiver<tray::TrayCommand>,
-    last_tray_only: bool,
+    last_hide_taskbar: bool,
 }
 
 impl NetmonApp {
@@ -31,7 +31,7 @@ impl NetmonApp {
         cfg_tx: tokio::sync::watch::Sender<crate::config::AppConfig>,
         tray_rx: mpsc::Receiver<tray::TrayCommand>,
         app_state: Arc<Mutex<AppState>>,
-        initial_tray_only: bool,
+        initial_hide_taskbar: bool,
     ) -> Self {
         Self {
             state: app_state,
@@ -39,7 +39,7 @@ impl NetmonApp {
             trigger_tx,
             cfg_tx,
             tray_rx,
-            last_tray_only: initial_tray_only,
+            last_hide_taskbar: initial_hide_taskbar,
         }
     }
 }
@@ -83,15 +83,15 @@ impl eframe::App for NetmonApp {
                     ui::widget::handle_menu_action(act, ui.ctx(), &mut st);
                 }
             }
-            self.last_tray_only = st.config.tray_only;
+            self.last_hide_taskbar = st.config.hide_taskbar;
         }
 
         let mut st = self.state.lock().unwrap();
-        if st.config.tray_only != self.last_tray_only {
-            self.last_tray_only = st.config.tray_only;
-            ui::widget::apply_tray_only_visibility(ui.ctx(), &mut st);
+        if st.config.hide_taskbar != self.last_hide_taskbar {
+            self.last_hide_taskbar = st.config.hide_taskbar;
+            platform::set_skip_taskbar(st.config.hide_taskbar);
         }
-        if !st.config.tray_only {
+        if !st.minimized_to_tray {
             ui::widget::draw(ui, &mut st);
         } else {
             ui.ctx()
@@ -100,7 +100,7 @@ impl eframe::App for NetmonApp {
 
         if st.show_settings {
             ui::settings::draw(ui.ctx(), &mut st);
-            self.last_tray_only = st.config.tray_only;
+            self.last_hide_taskbar = st.config.hide_taskbar;
         }
         if st.editing_check.is_some() {
             ui::edit_host::draw(ui.ctx(), &mut st);
@@ -268,25 +268,17 @@ fn main() -> eframe::Result<()> {
         height: 64,
     });
 
-    let initial_tray_only = cfg.tray_only;
-    let (start_pos, start_size) = if initial_tray_only {
-        (
-            eframe::egui::Pos2::new(-32000.0, -32000.0),
-            [1.0, 1.0],
-        )
-    } else {
-        (resolved_pos, [initial_width, initial_height])
-    };
+    let initial_hide_taskbar = cfg.hide_taskbar;
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size(start_size)
+        .with_inner_size([initial_width, initial_height])
         .with_min_inner_size([1.0, 1.0])
-        .with_position(start_pos)
+        .with_position(resolved_pos)
         .with_icon(app_icon)
         .with_resizable(true)
         .with_decorations(false)
         .with_transparent(true)
-        .with_taskbar(false)
-        .with_mouse_passthrough(initial_tray_only);
+        .with_taskbar(!initial_hide_taskbar)
+        .with_mouse_passthrough(false);
     if cfg.always_on_top {
         viewport = viewport.with_always_on_top();
     }
@@ -308,7 +300,7 @@ fn main() -> eframe::Result<()> {
                 cfg_tx,
                 tray_rx,
                 state_for_app,
-                initial_tray_only,
+                initial_hide_taskbar,
             )))
         }),
     )

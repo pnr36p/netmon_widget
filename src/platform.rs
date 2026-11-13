@@ -158,6 +158,136 @@ mod win {
             res
         }
     }
+
+    #[repr(C)]
+    struct Guid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
+
+    #[repr(C)]
+    struct ITaskbarListVtbl {
+        query_interface: unsafe extern "system" fn(*mut std::ffi::c_void, *const Guid, *mut *mut std::ffi::c_void) -> i32,
+        add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+        release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+        hr_init: unsafe extern "system" fn(*mut std::ffi::c_void) -> i32,
+        add_tab: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32,
+        delete_tab: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32,
+    }
+
+    #[repr(C)]
+    struct ITaskbarList {
+        vtbl: *const ITaskbarListVtbl,
+    }
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoInitializeEx(pv_reserved: *mut std::ffi::c_void, dw_co_init: u32) -> i32;
+        fn CoUninitialize();
+        fn CoCreateInstance(
+            rclsid: *const Guid,
+            p_unk_outer: *mut std::ffi::c_void,
+            dw_cls_context: u32,
+            riid: *const Guid,
+            ppv: *mut *mut std::ffi::c_void,
+        ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcessId() -> u32;
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(
+            lp_enum_func: unsafe extern "system" fn(isize, isize) -> i32,
+            l_param: isize,
+        ) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, lpdw_process_id: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn GetWindowTextW(hwnd: isize, lp_string: *mut u16, n_max_count: i32) -> i32;
+    }
+
+    unsafe extern "system" fn find_main_hwnd_proc(hwnd: isize, lparam: isize) -> i32 {
+        unsafe {
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid != GetCurrentProcessId() || IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            let mut buf = [0u16; 128];
+            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if len > 0 {
+                let title = String::from_utf16_lossy(&buf[..len as usize]);
+                if title == "netmon_widget" {
+                    let out = lparam as *mut isize;
+                    *out = hwnd;
+                    return 0;
+                }
+            }
+            1
+        }
+    }
+
+    pub fn set_skip_taskbar(skip: bool) {
+        const COINIT_APARTMENTTHREADED: u32 = 0x2;
+        const CLSCTX_INPROC_SERVER: u32 = 0x1;
+        const RPC_E_CHANGED_MODE: i32 = -2147417850; // 0x80010106
+        const CLSID_TASKBAR_LIST: Guid = Guid {
+            data1: 0x56FDF344,
+            data2: 0xFD6D,
+            data3: 0x11D0,
+            data4: [0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90],
+        };
+        const IID_ITASKBAR_LIST: Guid = Guid {
+            data1: 0x56FDF342,
+            data2: 0xFD6D,
+            data3: 0x11D0,
+            data4: [0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90],
+        };
+
+        unsafe {
+            let mut hwnd: isize = 0;
+            EnumWindows(find_main_hwnd_proc, (&mut hwnd as *mut isize) as isize);
+            if hwnd == 0 {
+                return;
+            }
+
+            let hr_init_com = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+            let need_uninit = hr_init_com == 0 || hr_init_com == 1;
+            if hr_init_com < 0 && hr_init_com != RPC_E_CHANGED_MODE {
+                return;
+            }
+
+            let mut obj: *mut std::ffi::c_void = std::ptr::null_mut();
+            let hr = CoCreateInstance(
+                &CLSID_TASKBAR_LIST,
+                std::ptr::null_mut(),
+                CLSCTX_INPROC_SERVER,
+                &IID_ITASKBAR_LIST,
+                &mut obj,
+            );
+            if hr >= 0 && !obj.is_null() {
+                let tbl = obj as *mut ITaskbarList;
+                let vtbl = &*(*tbl).vtbl;
+                if (vtbl.hr_init)(obj) >= 0 {
+                    if skip {
+                        (vtbl.delete_tab)(obj, hwnd);
+                    } else {
+                        (vtbl.add_tab)(obj, hwnd);
+                    }
+                }
+                (vtbl.release)(obj);
+            }
+
+            if need_uninit {
+                CoUninitialize();
+            }
+        }
+    }
 }
 
 pub fn current_exe_path() -> PathBuf {
@@ -195,6 +325,17 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     {
         let _ = enabled;
         Ok(())
+    }
+}
+
+pub fn set_skip_taskbar(skip: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        win::set_skip_taskbar(skip);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = skip;
     }
 }
 

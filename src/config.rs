@@ -261,8 +261,8 @@ pub struct AppConfig {
     pub opacity: f32,
     #[serde(default = "default_always_on_top")]
     pub always_on_top: bool,
-    #[serde(default)]
-    pub tray_only: bool,
+    #[serde(default, alias = "tray_only")]
+    pub hide_taskbar: bool,
     #[serde(default)]
     pub language: Language,
     #[serde(default)]
@@ -305,7 +305,7 @@ impl Default for AppConfig {
             interval_sec: 5,
             opacity: 0.85,
             always_on_top: true,
-            tray_only: false,
+            hide_taskbar: false,
             language: Language::Ru,
             theme: ThemeMode::System,
             size: SizePreset::S,
@@ -564,7 +564,7 @@ pub fn save_config(cfg: &AppConfig) {
             disk_cfg.interval_sec = cfg.interval_sec;
             disk_cfg.opacity = cfg.opacity;
             disk_cfg.always_on_top = cfg.always_on_top;
-            disk_cfg.tray_only = cfg.tray_only;
+            disk_cfg.hide_taskbar = cfg.hide_taskbar;
             disk_cfg.language = cfg.language;
             disk_cfg.theme = cfg.theme;
             disk_cfg.size = cfg.size;
