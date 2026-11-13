@@ -1,0 +1,31 @@
+[package]
+name = "netmon_widget"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Lightweight Windows 7 Network Monitor Gadget inspired desktop widget in Rust/egui"
+license = "MIT"
+repository = "https://github.com/pnr36p/netmon_widget"
+readme = "README.md"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.37"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+trust-dns-resolver = "0.23"
+chrono = "0.4"
+
+# Системный трей (только Windows)
+[target.'cfg(target_os = "windows")'.dependencies]
+systray = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

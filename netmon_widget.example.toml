@@ -1,0 +1,70 @@
+# ============================================================================
+# NetMon Widget — Starter Configuration (copy to netmon_widget.toml or run app)
+# ============================================================================
+# Available sensor types (field `type`):
+#   ping          — ICMP Ping
+#   tcp           — TCP port connect check (default port 80)
+#   http / https  — HTTP/HTTPS GET (expects 2xx/3xx; default ports 80 / 443)
+#   dns           — live DNS query (UDP query to DNS server IP:53 or domain)
+#
+# Non-critical sensors (show yellow minus instead of red cross when offline
+# and do NOT mark the system tray icon as error):
+#   ping_optional, tcp_optional, http_optional, https_optional, dns_optional
+#   (or add optional = true to any regular sensor type)
+#
+# Fields in [[sections.checks]]:
+#   name         — display name
+#   host         — IP address or domain name
+#   type         — sensor type (see above)
+#   port         — [optional] port (for tcp/http/https/dns; unused by ping)
+#   timeout_ms   — [optional] timeout in ms (default 3000)
+#   interval_sec — [optional] custom poll interval in sec (default: global)
+#   optional     — [optional] true = non-critical host (default false)
+#   notify       — [optional] true = popup notifications on status change (default false)
+# ============================================================================
+
+interval_sec = 5
+opacity = 0.88
+always_on_top = true
+language = "ru"
+theme = "system"
+size = "xs"
+
+[[sections]]
+name = "Local Network"
+
+[[sections.checks]]
+name = "Router"
+host = "192.168.1.1"
+type = "ping"
+timeout_ms = 1500
+notify = true
+
+[[sections.checks]]
+name = "Network Printer"
+host = "192.168.1.50"
+type = "ping_optional"
+timeout_ms = 1500
+
+[[sections]]
+name = "Internet"
+
+[[sections.checks]]
+name = "DNS Cloudflare"
+host = "1.1.1.1"
+type = "dns"
+timeout_ms = 2000
+notify = true
+
+[[sections.checks]]
+name = "DNS Google"
+host = "8.8.8.8"
+type = "dns"
+timeout_ms = 2000
+
+[[sections.checks]]
+name = "GitHub HTTPS"
+host = "github.com"
+type = "https"
+timeout_ms = 3000
+interval_sec = 15

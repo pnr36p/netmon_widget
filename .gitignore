@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Compiled binaries
+*.exe
+*.dll
+
+# User configuration & runtime data (kept local so personal hosts/IPs never leak)
+netmon_widget.toml
+Network.csv
+network.csv
+netmon_history.dat
+*.dat
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
