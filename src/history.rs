@@ -66,7 +66,7 @@ impl UptimeHistory {
     }
 
     pub fn parse_str(content: &str, now_sec: i64) -> Self {
-        let cutoff = ((now_sec - MONTH_SECS) / BUCKET_SECS) * BUCKET_SECS;
+        let cutoff = (now_sec - MONTH_SECS).div_euclid(BUCKET_SECS) * BUCKET_SECS;
         let mut series: HashMap<String, Vec<UptimeBucket>> = HashMap::new();
 
         for line in content.lines() {
@@ -136,7 +136,7 @@ impl UptimeHistory {
     pub fn record(&mut self, cfg: &CheckConfig, timestamp_sec: i64, ok: bool) {
         let key = check_history_key(cfg);
         let bucket_ts = timestamp_sec.div_euclid(BUCKET_SECS) * BUCKET_SECS;
-        let cutoff = ((timestamp_sec - MONTH_SECS) / BUCKET_SECS) * BUCKET_SECS;
+        let cutoff = (timestamp_sec - MONTH_SECS).div_euclid(BUCKET_SECS) * BUCKET_SECS;
 
         let list = self.series.entry(key).or_default();
         if let Some(last) = list.last_mut().filter(|b| b.bucket_ts == bucket_ts) {
@@ -205,14 +205,14 @@ impl UptimeHistory {
             return;
         }
         let content = self.serialize_str();
-        if std::fs::write(history_path(), content).is_ok() {
+        if crate::config::atomic_write(&history_path(), content.as_bytes()).is_ok() {
             self.dirty = false;
         }
     }
 
     pub fn force_save(&mut self) {
         let content = self.serialize_str();
-        if std::fs::write(history_path(), content).is_ok() {
+        if crate::config::atomic_write(&history_path(), content.as_bytes()).is_ok() {
             self.dirty = false;
         }
     }

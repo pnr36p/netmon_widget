@@ -1,3 +1,5 @@
+#![allow(clippy::upper_case_acronyms)]
+
 #[cfg(target_os = "windows")]
 pub mod native {
     use crate::i18n::{tr, Language};
@@ -217,11 +219,13 @@ pub mod native {
     }
 
     thread_local! {
-        static MENU_OWNER: RefCell<OwnerState> = RefCell::new(OwnerState {
-            hwnd: std::ptr::null_mut(),
-            is_dark: true,
-            scale: 1.0,
-        });
+        static MENU_OWNER: RefCell<OwnerState> = const {
+            RefCell::new(OwnerState {
+                hwnd: std::ptr::null_mut(),
+                is_dark: true,
+                scale: 1.0,
+            })
+        };
     }
 
     unsafe fn make_menu_font(scale: f32) -> HFONT {
@@ -521,7 +525,20 @@ pub mod native {
         Close,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    pub struct PopupMenuState {
+        pub lang: Language,
+        pub is_dark: bool,
+        pub always_on_top: bool,
+        pub minimized: bool,
+        pub hide_taskbar: bool,
+        pub update_ready: bool,
+        pub interval_sec: u64,
+    }
+
     struct MenuBuilder {
+        // Box обеспечивает стабильные адреса в памяти для указателей item_data в MF_OWNERDRAW при росте Vec.
+        #[allow(clippy::vec_box)]
         entries: Vec<Box<MenuEntry>>,
         action_ids: Vec<NativeMenuAction>,
     }
@@ -580,20 +597,33 @@ pub mod native {
     }
 
     pub fn show_popup(
-        lang: Language,
-        is_dark: bool,
-        always_on_top: bool,
-        minimized: bool,
-        hide_taskbar: bool,
-        update_ready: bool,
-        interval_sec: u64,
+        opts: PopupMenuState,
         target: MenuTarget<'_>,
     ) -> Option<NativeMenuAction> {
+        let lang = opts.lang;
+        let is_dark = opts.is_dark;
+        let always_on_top = opts.always_on_top;
+        let minimized = opts.minimized;
+        let hide_taskbar = opts.hide_taskbar;
+        let update_ready = opts.update_ready;
+        let interval_sec = opts.interval_sec;
         let s = tr(lang);
         unsafe {
             let owner_hwnd = ensure_owner_hwnd(is_dark);
             if owner_hwnd.is_null() {
                 return None;
+            }
+
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            let cursor_pos = eframe::egui::Pos2::new(pt.x as f32, pt.y as f32);
+            let monitors = crate::monitor::get_all_monitors();
+            if let Some(mon) = monitors
+                .iter()
+                .find(|m| m.monitor_rect.contains(cursor_pos))
+                .or_else(|| crate::monitor::primary_or_first(&monitors))
+            {
+                MENU_OWNER.with(|o| o.borrow_mut().scale = mon.scale.max(1.0));
             }
 
             let hmenu = CreatePopupMenu();
@@ -610,31 +640,11 @@ pub mod native {
                     name,
                     sec_name,
                 } => {
-                    let edit_lbl = match lang {
-                        Language::Ru => format!("Редактировать «{}»...", name),
-                        Language::En => format!("Edit \"{}\"...", name),
-                        Language::Hr => format!("Uredi \"{}\"...", name),
-                    };
-                    let clone_lbl = match lang {
-                        Language::Ru => format!("Клонировать «{}»...", name),
-                        Language::En => format!("Clone \"{}\"...", name),
-                        Language::Hr => format!("Kloniraj \"{}\"...", name),
-                    };
-                    let del_lbl = match lang {
-                        Language::Ru => format!("Удалить «{}»", name),
-                        Language::En => format!("Delete \"{}\"", name),
-                        Language::Hr => format!("Obriši \"{}\"", name),
-                    };
-                    let ren_grp = match lang {
-                        Language::Ru => format!("Переименовать группу «{}»...", sec_name),
-                        Language::En => format!("Rename group \"{}\"...", sec_name),
-                        Language::Hr => format!("Preimenuj grupu \"{}\"...", sec_name),
-                    };
-                    let del_grp = match lang {
-                        Language::Ru => format!("Удалить группу «{}»", sec_name),
-                        Language::En => format!("Delete group \"{}\"", sec_name),
-                        Language::Hr => format!("Obriši grupu \"{}\"", sec_name),
-                    };
+                    let edit_lbl = s.menu_edit_host.replace("{}", name);
+                    let clone_lbl = s.menu_clone_host.replace("{}", name);
+                    let del_lbl = s.menu_delete_host.replace("{}", name);
+                    let ren_grp = s.menu_rename_group.replace("{}", sec_name);
+                    let del_grp = s.menu_delete_group.replace("{}", sec_name);
                     mb.add_item(hmenu, &edit_lbl, false, NativeMenuAction::EditCheck(sec_idx, chk_idx));
                     mb.add_item(hmenu, &clone_lbl, false, NativeMenuAction::CloneCheck(sec_idx, chk_idx));
                     mb.add_item(hmenu, s.menu_add_host, false, NativeMenuAction::AddCheck(sec_idx));
@@ -646,21 +656,9 @@ pub mod native {
                     mb.add_sep(hmenu);
                 }
                 MenuTarget::Section { sec_idx, name } => {
-                    let add_in = match lang {
-                        Language::Ru => format!("Добавить узел в «{}»...", name),
-                        Language::En => format!("Add host to \"{}\"...", name),
-                        Language::Hr => format!("Dodaj čvor u \"{}\"...", name),
-                    };
-                    let ren_grp = match lang {
-                        Language::Ru => format!("Переименовать группу «{}»...", name),
-                        Language::En => format!("Rename group \"{}\"...", name),
-                        Language::Hr => format!("Preimenuj grupu \"{}\"...", name),
-                    };
-                    let del_grp = match lang {
-                        Language::Ru => format!("Удалить группу «{}»", name),
-                        Language::En => format!("Delete group \"{}\"", name),
-                        Language::Hr => format!("Obriši grupu \"{}\"", name),
-                    };
+                    let add_in = s.menu_add_host_in_group.replace("{}", name);
+                    let ren_grp = s.menu_rename_group.replace("{}", name);
+                    let del_grp = s.menu_delete_group.replace("{}", name);
                     mb.add_item(hmenu, &add_in, false, NativeMenuAction::AddCheck(sec_idx));
                     mb.add_item(hmenu, s.menu_add_group, false, NativeMenuAction::AddGroup);
                     mb.add_item(hmenu, &ren_grp, false, NativeMenuAction::RenameGroup(sec_idx));
@@ -761,8 +759,6 @@ pub mod native {
             };
             SetMenuInfo(hmenu, &mi);
 
-            let mut pt = POINT { x: 0, y: 0 };
-            GetCursorPos(&mut pt);
             SetForegroundWindow(owner_hwnd);
 
             let cmd = TrackPopupMenu(

@@ -71,6 +71,12 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
             if ctx.input(|i| i.viewport().close_requested()) {
                 keep_open = false;
             }
+            let enter_pressed = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc_pressed {
+                keep_open = false;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::new(8.0, 7.0);
@@ -162,13 +168,21 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    if ui.button(s.btn_save).clicked() {
+                    if ui.button(s.btn_save).clicked() || (enter_pressed && !esc_pressed) {
                         if state.config.sections.is_empty() {
                             edit.error_msg = Some(s.err_no_sections.to_string());
                         } else {
                             match build_updated_config(&edit, lang) {
                                 Ok(new_chk) => {
                                     apply_edit(state, &edit, new_chk);
+                                    if state.config.custom_height.is_none() && !state.minimized_to_tray {
+                                        ui.ctx().send_viewport_cmd_to(
+                                            egui::ViewportId::ROOT,
+                                            ViewportCommand::InnerSize(
+                                                crate::ui::widget::desired_widget_size(state),
+                                            ),
+                                        );
+                                    }
                                     keep_open = false;
                                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                                 }
@@ -181,6 +195,14 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
 
                     if !edit.is_new && ui.button(s.btn_delete).clicked() {
                         state.delete_check(edit.section_idx, edit.check_idx);
+                        if state.config.custom_height.is_none() && !state.minimized_to_tray {
+                            ui.ctx().send_viewport_cmd_to(
+                                egui::ViewportId::ROOT,
+                                ViewportCommand::InnerSize(
+                                    crate::ui::widget::desired_widget_size(state),
+                                ),
+                            );
+                        }
                         keep_open = false;
                         ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                     }
@@ -241,6 +263,12 @@ pub fn draw_group(ctx: &egui::Context, state: &mut AppState) {
             if ctx.input(|i| i.viewport().close_requested()) {
                 keep_open = false;
             }
+            let enter_pressed = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc_pressed {
+                keep_open = false;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::new(8.0, 8.0);
@@ -253,7 +281,7 @@ pub fn draw_group(ctx: &egui::Context, state: &mut AppState) {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button(s.btn_save).clicked() {
+                    if ui.button(s.btn_save).clicked() || (enter_pressed && !esc_pressed) {
                         let trimmed = grp.name.trim().to_string();
                         if trimmed.is_empty() {
                             grp.error_msg = Some(s.err_enter_group_name.to_string());
@@ -276,6 +304,14 @@ pub fn draw_group(ctx: &egui::Context, state: &mut AppState) {
                                 });
                             }
                             state.sync_config_to_disk();
+                            if state.config.custom_height.is_none() && !state.minimized_to_tray {
+                                ui.ctx().send_viewport_cmd_to(
+                                    egui::ViewportId::ROOT,
+                                    ViewportCommand::InnerSize(
+                                        crate::ui::widget::desired_widget_size(state),
+                                    ),
+                                );
+                            }
                             keep_open = false;
                             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                         }

@@ -76,7 +76,7 @@ Configuration is stored **alongside the `.exe`** and automatically hot-reloaded 
 interval_sec = 5
 opacity = 0.88
 always_on_top = true
-language = "en"      # "ru" | "en"
+language = "en"      # "ru" | "en" | "hr"
 theme = "system"     # "system" | "dark" | "light"
 size = "xs"          # "xs" | "s" | "m" | "l" | "xl"
 

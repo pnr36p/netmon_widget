@@ -1,3 +1,5 @@
+#![allow(clippy::upper_case_acronyms)]
+
 use std::path::PathBuf;
 
 /// Стабильный 32-битный FNV-1a хеш для уникального имени ключа автозагрузки по пути к exe.
@@ -198,8 +200,11 @@ mod win {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetCurrentProcessId() -> u32;
-        fn GetModuleHandleA(lp_module_name: *const i8) -> *mut std::ffi::c_void;
-        fn GetProcAddress(h_module: *mut std::ffi::c_void, lp_proc_name: *const i8) -> *const std::ffi::c_void;
+        fn GetModuleHandleA(lp_module_name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+        fn GetProcAddress(
+            h_module: *mut std::ffi::c_void,
+            lp_proc_name: *const std::ffi::c_char,
+        ) -> *const std::ffi::c_void;
     }
 
     #[repr(C)]
@@ -316,8 +321,7 @@ mod win {
         };
 
         unsafe {
-            let mut hwnd: isize = 0;
-            EnumWindows(find_main_hwnd_proc, (&mut hwnd as *mut isize) as isize);
+            let hwnd = find_main_hwnd();
             if hwnd == 0 {
                 return;
             }
@@ -372,16 +376,26 @@ mod win {
 
     fn window_dpi_scale(hwnd: isize) -> f32 {
         type GetDpiForWindowFn = unsafe extern "system" fn(isize) -> u32;
-        unsafe {
-            let hmod = GetModuleHandleA(b"user32.dll\0".as_ptr() as *const i8);
-            if !hmod.is_null() {
-                let proc = GetProcAddress(hmod, b"GetDpiForWindow\0".as_ptr() as *const i8);
-                if !proc.is_null() {
-                    let func: GetDpiForWindowFn = std::mem::transmute(proc);
-                    let dpi = func(hwnd);
-                    if dpi >= 48 {
-                        return (dpi as f32 / 96.0).clamp(0.75, 4.0);
-                    }
+        static GET_DPI_FOR_WINDOW: std::sync::OnceLock<Option<GetDpiForWindowFn>> =
+            std::sync::OnceLock::new();
+
+        let func_opt = GET_DPI_FOR_WINDOW.get_or_init(|| unsafe {
+            let hmod = GetModuleHandleA(c"user32.dll".as_ptr());
+            if hmod.is_null() {
+                return None;
+            }
+            let proc = GetProcAddress(hmod, c"GetDpiForWindow".as_ptr());
+            if proc.is_null() {
+                return None;
+            }
+            Some(std::mem::transmute::<*const std::ffi::c_void, GetDpiForWindowFn>(proc))
+        });
+
+        if let Some(func) = func_opt {
+            unsafe {
+                let dpi = func(hwnd);
+                if dpi >= 48 {
+                    return (dpi as f32 / 96.0).clamp(0.75, 4.0);
                 }
             }
         }

@@ -1,3 +1,5 @@
+#![allow(clippy::upper_case_acronyms)]
+
 use eframe::egui::{Pos2, Rect, Vec2};
 use std::ffi::c_void;
 
@@ -52,10 +54,6 @@ pub struct MonitorInfo {
 }
 
 impl MonitorInfo {
-    pub fn contains_point(&self, p: Pos2) -> bool {
-        self.monitor_rect.contains(p)
-    }
-
     pub fn logical_work_rect(&self) -> Rect {
         let s = self.scale.max(0.5);
         Rect::from_min_max(self.work_rect.min / s, self.work_rect.max / s)
@@ -74,22 +72,34 @@ impl MonitorInfo {
 fn query_monitor_scale(hmon: HMONITOR) -> f32 {
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn LoadLibraryA(lp_lib_file_name: *const i8) -> *mut c_void;
-        fn GetProcAddress(h_module: *mut c_void, lp_proc_name: *const i8) -> *const c_void;
+        fn LoadLibraryA(lp_lib_file_name: *const std::ffi::c_char) -> *mut c_void;
+        fn GetProcAddress(
+            h_module: *mut c_void,
+            lp_proc_name: *const std::ffi::c_char,
+        ) -> *const c_void;
     }
     type GetDpiForMonitorFn = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> i32;
+    static GET_DPI_FOR_MONITOR: std::sync::OnceLock<Option<GetDpiForMonitorFn>> =
+        std::sync::OnceLock::new();
 
-    unsafe {
-        let hmod = LoadLibraryA(b"shcore.dll\0".as_ptr() as *const i8);
-        if !hmod.is_null() {
-            let proc = GetProcAddress(hmod, b"GetDpiForMonitor\0".as_ptr() as *const i8);
-            if !proc.is_null() {
-                let func: GetDpiForMonitorFn = std::mem::transmute(proc);
-                let mut dpi_x: u32 = 96;
-                let mut dpi_y: u32 = 96;
-                if func(hmon, 0, &mut dpi_x, &mut dpi_y) == 0 && dpi_x >= 48 {
-                    return (dpi_x as f32 / 96.0).clamp(0.75, 4.0);
-                }
+    let func_opt = GET_DPI_FOR_MONITOR.get_or_init(|| unsafe {
+        let hmod = LoadLibraryA(c"shcore.dll".as_ptr());
+        if hmod.is_null() {
+            return None;
+        }
+        let proc = GetProcAddress(hmod, c"GetDpiForMonitor".as_ptr());
+        if proc.is_null() {
+            return None;
+        }
+        Some(std::mem::transmute::<*const c_void, GetDpiForMonitorFn>(proc))
+    });
+
+    if let Some(func) = func_opt {
+        unsafe {
+            let mut dpi_x: u32 = 96;
+            let mut dpi_y: u32 = 96;
+            if func(hmon, 0, &mut dpi_x, &mut dpi_y) == 0 && dpi_x >= 48 {
+                return (dpi_x as f32 / 96.0).clamp(0.75, 4.0);
             }
         }
     }

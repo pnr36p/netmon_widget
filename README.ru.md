@@ -76,7 +76,7 @@ cargo test
 interval_sec = 5
 opacity = 0.88
 always_on_top = true
-language = "ru"      # "ru" | "en"
+language = "ru"      # "ru" | "en" | "hr"
 theme = "system"     # "system" | "dark" | "light"
 size = "xs"          # "xs" | "s" | "m" | "l" | "xl"
 

@@ -202,11 +202,12 @@ pub struct SectionConfig {
     pub checks: Vec<CheckConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SizePreset {
     #[serde(rename = "xs")]
     Xs,
     #[serde(rename = "s")]
+    #[default]
     S,
     #[serde(rename = "m")]
     M,
@@ -214,12 +215,6 @@ pub enum SizePreset {
     L,
     #[serde(rename = "xl")]
     Xl,
-}
-
-impl Default for SizePreset {
-    fn default() -> Self {
-        SizePreset::S
-    }
 }
 
 impl SizePreset {
@@ -265,20 +260,6 @@ impl SizePreset {
 
     pub fn header_height(&self) -> f32 {
         12.0
-    }
-
-    pub fn row_padding(&self) -> f32 {
-        match self {
-            SizePreset::Xs => 1.0,
-            SizePreset::S => 2.0,
-            SizePreset::M => 3.0,
-            SizePreset::L => 4.0,
-            SizePreset::Xl => 5.0,
-        }
-    }
-
-    pub fn section_spacing(&self) -> f32 {
-        0.0
     }
 }
 
@@ -503,11 +484,36 @@ pub fn config_path() -> PathBuf {
     exe_cfg
 }
 
+pub fn atomic_write(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+    std::fs::write(&tmp_path, data)?;
+    if std::fs::rename(&tmp_path, path).is_err() {
+        let res = std::fs::write(path, data);
+        let _ = std::fs::remove_file(&tmp_path);
+        return res;
+    }
+    Ok(())
+}
+
+fn backup_corrupted_config(path: &std::path::Path) {
+    let mut bak_os = path.as_os_str().to_os_string();
+    bak_os.push(".bak");
+    let _ = std::fs::copy(path, PathBuf::from(bak_os));
+}
+
 fn write_toml_with_header(path: &std::path::Path, cfg: &AppConfig) {
     if let Ok(s) = toml::to_string_pretty(cfg) {
         let content = format!("{}{}", help_header(cfg.language), s);
-        let _ = std::fs::write(path, content);
+        let _ = atomic_write(path, content.as_bytes());
     }
+}
+
+pub fn try_load_config_from(path: &std::path::Path) -> Result<AppConfig, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    toml::from_str::<AppConfig>(&text).map_err(|e| format!("TOML parse error: {}", e))
 }
 
 fn example_config_path() -> Option<PathBuf> {
@@ -528,7 +534,13 @@ fn example_config_path() -> Option<PathBuf> {
 pub fn load_config() -> AppConfig {
     let path = config_path();
     let mut cfg: AppConfig = if let Ok(text) = std::fs::read_to_string(&path) {
-        toml::from_str(&text).unwrap_or_default()
+        match toml::from_str::<AppConfig>(&text) {
+            Ok(c) => c,
+            Err(_) => {
+                backup_corrupted_config(&path);
+                AppConfig::default()
+            }
+        }
     } else if let Some(ex_path) = example_config_path() {
         std::fs::read_to_string(&ex_path)
             .ok()
@@ -598,30 +610,35 @@ pub fn load_config() -> AppConfig {
 pub fn save_config(cfg: &AppConfig) {
     let path = config_path();
     if let Ok(text) = std::fs::read_to_string(&path) {
-        if let Ok(mut disk_cfg) = toml::from_str::<AppConfig>(&text) {
-            disk_cfg.interval_sec = cfg.interval_sec;
-            disk_cfg.opacity = cfg.opacity;
-            disk_cfg.always_on_top = cfg.always_on_top;
-            disk_cfg.edge_snapping = cfg.edge_snapping;
-            disk_cfg.auto_update = cfg.auto_update;
-            disk_cfg.last_update_check_ts = cfg.last_update_check_ts;
-            disk_cfg.hide_taskbar = cfg.hide_taskbar;
-            disk_cfg.language = cfg.language;
-            disk_cfg.theme = cfg.theme;
-            disk_cfg.size = cfg.size;
-            disk_cfg.custom_width = cfg.custom_width;
-            disk_cfg.custom_height = cfg.custom_height;
-            disk_cfg.window_pos = cfg.window_pos;
-            disk_cfg.settings_window_pos = cfg.settings_window_pos;
-            disk_cfg.edit_window_pos = cfg.edit_window_pos;
-            disk_cfg.monitor_id = cfg.monitor_id.clone();
-            disk_cfg.rel_pos = cfg.rel_pos;
-            disk_cfg.fallback_active = cfg.fallback_active;
-            if disk_cfg.sections.is_empty() && !cfg.sections.is_empty() {
-                disk_cfg.sections = cfg.sections.clone();
+        match toml::from_str::<AppConfig>(&text) {
+            Ok(mut disk_cfg) => {
+                disk_cfg.interval_sec = cfg.interval_sec;
+                disk_cfg.opacity = cfg.opacity;
+                disk_cfg.always_on_top = cfg.always_on_top;
+                disk_cfg.edge_snapping = cfg.edge_snapping;
+                disk_cfg.auto_update = cfg.auto_update;
+                disk_cfg.last_update_check_ts = cfg.last_update_check_ts;
+                disk_cfg.hide_taskbar = cfg.hide_taskbar;
+                disk_cfg.language = cfg.language;
+                disk_cfg.theme = cfg.theme;
+                disk_cfg.size = cfg.size;
+                disk_cfg.custom_width = cfg.custom_width;
+                disk_cfg.custom_height = cfg.custom_height;
+                disk_cfg.window_pos = cfg.window_pos;
+                disk_cfg.settings_window_pos = cfg.settings_window_pos;
+                disk_cfg.edit_window_pos = cfg.edit_window_pos;
+                disk_cfg.monitor_id = cfg.monitor_id.clone();
+                disk_cfg.rel_pos = cfg.rel_pos;
+                disk_cfg.fallback_active = cfg.fallback_active;
+                if disk_cfg.sections.is_empty() && !cfg.sections.is_empty() {
+                    disk_cfg.sections = cfg.sections.clone();
+                }
+                write_toml_with_header(&path, &disk_cfg);
+                return;
             }
-            write_toml_with_header(&path, &disk_cfg);
-            return;
+            Err(_) => {
+                backup_corrupted_config(&path);
+            }
         }
     }
     write_toml_with_header(&path, cfg);

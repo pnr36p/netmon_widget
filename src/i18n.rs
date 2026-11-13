@@ -47,6 +47,7 @@ pub struct Strings {
     pub menu_add_host: &'static str,
     pub menu_add_host_in_group: &'static str,
     pub menu_edit_host: &'static str,
+    pub menu_clone_host: &'static str,
     pub menu_delete_host: &'static str,
     pub menu_add_group: &'static str,
     pub menu_rename_group: &'static str,
@@ -145,6 +146,7 @@ pub struct Strings {
     pub tt_ms: &'static str,
 
     // Трей
+    pub tray_starting: &'static str,
     pub tray_online_opt: &'static str,
     pub tray_all_online: &'static str,
     pub tray_checking: &'static str,
@@ -158,16 +160,18 @@ pub struct Strings {
     pub notify_back_online: &'static str,
     pub notify_update_title: &'static str,
     pub notify_update_body: &'static str,
+    pub notify_csv_err_title: &'static str,
 }
 
 const RU: Strings = Strings {
     menu_add_host: "Добавить узел...",
-    menu_add_host_in_group: "Добавить узел в группу...",
-    menu_edit_host: "Редактировать узел...",
-    menu_delete_host: "Удалить узел",
+    menu_add_host_in_group: "Добавить узел в «{}»...",
+    menu_edit_host: "Редактировать «{}»...",
+    menu_clone_host: "Клонировать «{}»...",
+    menu_delete_host: "Удалить «{}»",
     menu_add_group: "Добавить группу...",
-    menu_rename_group: "Переименовать группу...",
-    menu_delete_group: "Удалить группу",
+    menu_rename_group: "Переименовать группу «{}»...",
+    menu_delete_group: "Удалить группу «{}»",
     menu_refresh: "Обновить сейчас",
     menu_interval: "Общий интервал опроса",
     menu_settings: "Настройки...",
@@ -258,6 +262,7 @@ const RU: Strings = Strings {
     tt_month: "Месяц",
     tt_ms: "мс",
 
+    tray_starting: "NetMon Widget — Запуск…",
     tray_online_opt: "В сети ({}/{}), доп. выкл: {}",
     tray_all_online: "Все узлы в сети ({}/{})",
     tray_checking: "Проверка узлов ({}/{})…",
@@ -270,16 +275,18 @@ const RU: Strings = Strings {
     notify_back_online: "снова в сети",
     notify_update_title: "Netmon Widget — Обновление готово",
     notify_update_body: "Версия {} загружена. Перезапустите приложение для установки.",
+    notify_csv_err_title: "Netmon Widget — Ошибка импорта Network.csv",
 };
 
 const EN: Strings = Strings {
     menu_add_host: "Add host...",
-    menu_add_host_in_group: "Add host to group...",
-    menu_edit_host: "Edit host...",
-    menu_delete_host: "Delete host",
+    menu_add_host_in_group: "Add host to \"{}\"...",
+    menu_edit_host: "Edit \"{}\"...",
+    menu_clone_host: "Clone \"{}\"...",
+    menu_delete_host: "Delete \"{}\"",
     menu_add_group: "Add group...",
-    menu_rename_group: "Rename group...",
-    menu_delete_group: "Delete group",
+    menu_rename_group: "Rename group \"{}\"...",
+    menu_delete_group: "Delete group \"{}\"",
     menu_refresh: "Refresh now",
     menu_interval: "Global poll interval",
     menu_settings: "Settings...",
@@ -370,6 +377,7 @@ const EN: Strings = Strings {
     tt_month: "Month",
     tt_ms: "ms",
 
+    tray_starting: "NetMon Widget — Starting…",
     tray_online_opt: "Online ({}/{}), opt. off: {}",
     tray_all_online: "All hosts online ({}/{})",
     tray_checking: "Checking hosts ({}/{})…",
@@ -382,16 +390,18 @@ const EN: Strings = Strings {
     notify_back_online: "is back online",
     notify_update_title: "Netmon Widget — Update Ready",
     notify_update_body: "Version {} downloaded. Restart the app to apply.",
+    notify_csv_err_title: "Netmon Widget — Network.csv import error",
 };
 
 const HR: Strings = Strings {
     menu_add_host: "Dodaj čvor...",
-    menu_add_host_in_group: "Dodaj čvor u grupu...",
-    menu_edit_host: "Uredi čvor...",
-    menu_delete_host: "Obriši čvor",
+    menu_add_host_in_group: "Dodaj čvor u \"{}\"...",
+    menu_edit_host: "Uredi \"{}\"...",
+    menu_clone_host: "Kloniraj \"{}\"...",
+    menu_delete_host: "Obriši \"{}\"",
     menu_add_group: "Dodaj grupu...",
-    menu_rename_group: "Preimenuj grupu...",
-    menu_delete_group: "Obriši grupu",
+    menu_rename_group: "Preimenuj grupu \"{}\"...",
+    menu_delete_group: "Obriši grupu \"{}\"",
     menu_refresh: "Osvježi sada",
     menu_interval: "Opći interval provjere",
     menu_settings: "Postavke...",
@@ -482,6 +492,7 @@ const HR: Strings = Strings {
     tt_month: "Mjesec",
     tt_ms: "ms",
 
+    tray_starting: "NetMon Widget — Pokretanje…",
     tray_online_opt: "Dostupno ({}/{}), nekrit. nedost.: {}",
     tray_all_online: "Svi čvorovi dostupni ({}/{})",
     tray_checking: "Provjera čvorova ({}/{})…",
@@ -494,6 +505,7 @@ const HR: Strings = Strings {
     notify_back_online: "ponovno je dostupan",
     notify_update_title: "Netmon Widget — Ažuriranje spremno",
     notify_update_body: "Verzija {} je preuzeta. Ponovno pokrenite aplikaciju za primjenu.",
+    notify_csv_err_title: "Netmon Widget — Greška uvoza Network.csv",
 };
 
 pub fn tr(lang: Language) -> &'static Strings {

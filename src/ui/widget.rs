@@ -72,6 +72,7 @@ pub fn apply_minimized_visibility(ctx: &egui::Context, state: &mut AppState) {
     let minimized = state.minimized_to_tray;
     if minimized {
         crate::ui::tooltip::hide();
+        crate::platform::set_skip_taskbar(true);
         state.main_outer_rect = None;
         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MousePassthrough(true));
         ctx.send_viewport_cmd_to(
@@ -152,6 +153,7 @@ pub fn apply_minimized_visibility(ctx: &egui::Context, state: &mut AppState) {
             target_pos.x.round() as i32,
             target_pos.y.round() as i32,
         );
+        crate::platform::set_skip_taskbar(state.config.hide_taskbar);
         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
     }
 }
@@ -190,6 +192,12 @@ pub fn handle_menu_action(
         }
         NativeMenuAction::DeleteCheck(sec_idx, chk_idx) => {
             state.delete_check(sec_idx, chk_idx);
+            if state.config.custom_height.is_none() && !state.minimized_to_tray {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::InnerSize(desired_widget_size(state)),
+                );
+            }
         }
         NativeMenuAction::AddGroup => {
             state.open_edit_group(EditGroupState {
@@ -209,13 +217,16 @@ pub fn handle_menu_action(
         }
         NativeMenuAction::DeleteGroup(sec_idx) => {
             state.delete_section(sec_idx);
+            if state.config.custom_height.is_none() && !state.minimized_to_tray {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::InnerSize(desired_widget_size(state)),
+                );
+            }
         }
         NativeMenuAction::SetInterval(sec) => {
             state.config.interval_sec = sec.clamp(1, 3600);
-            crate::config::save_config(&state.config);
-            state.config_modified = std::fs::metadata(crate::config::config_path())
-                .and_then(|m| m.modified())
-                .ok();
+            state.save_settings_to_disk();
             state.scheduler_needs_sync = true;
         }
         NativeMenuAction::Refresh => {
@@ -227,7 +238,7 @@ pub fn handle_menu_action(
         NativeMenuAction::ToggleAlwaysOnTop => {
             let aot = !state.config.always_on_top;
             state.config.always_on_top = aot;
-            crate::config::save_config(&state.config);
+            state.save_settings_to_disk();
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
                 egui::ViewportCommand::WindowLevel(if aot {
@@ -239,7 +250,7 @@ pub fn handle_menu_action(
         }
         NativeMenuAction::ToggleHideTaskbar => {
             state.config.hide_taskbar = !state.config.hide_taskbar;
-            crate::config::save_config(&state.config);
+            state.save_settings_to_disk();
             crate::platform::set_skip_taskbar(state.config.hide_taskbar);
         }
         NativeMenuAction::ToggleMinimize => {
@@ -248,12 +259,28 @@ pub fn handle_menu_action(
         }
         NativeMenuAction::ImportCsv => {
             let path = crate::config::network_csv_path();
-            if let Ok(sections) = crate::config::import_network_csv(&path) {
-                state.config.sections = sections;
-                state.sync_config_to_disk();
-                let new_cfg = state.config.clone();
-                state.apply_new_config(new_cfg);
-                state.manual_refresh_requested = true;
+            match crate::config::import_network_csv(&path) {
+                Ok(sections) => {
+                    state.config.sections = sections;
+                    state.sync_config_to_disk();
+                    let new_cfg = state.config.clone();
+                    state.apply_new_config(new_cfg);
+                    if state.config.custom_height.is_none() && !state.minimized_to_tray {
+                        ctx.send_viewport_cmd_to(
+                            egui::ViewportId::ROOT,
+                            egui::ViewportCommand::InnerSize(desired_widget_size(state)),
+                        );
+                    }
+                    state.manual_refresh_requested = true;
+                }
+                Err(e) => {
+                    let s = crate::i18n::tr(state.config.language);
+                    state.pending_notifications.push_back(crate::state::TrayNotification {
+                        title: s.notify_csv_err_title.to_string(),
+                        body: e,
+                        level: crate::state::TrayNotifyLevel::Warning,
+                    });
+                }
             }
         }
         NativeMenuAction::EditConfig => {
@@ -264,7 +291,7 @@ pub fn handle_menu_action(
             state.restart_for_update_requested = true;
         }
         NativeMenuAction::Close => {
-            crate::config::save_config(&state.config);
+            state.save_settings_to_disk();
             state.uptime_history.force_save();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -308,7 +335,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     state.config.fallback_active = false;
                     state.window_pos = Some([phys.min.x, phys.min.y]);
                 }
-                crate::config::save_config(&state.config);
+                state.save_settings_to_disk();
             }
         }
     }
@@ -343,7 +370,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                         snapped.y.round() as i32,
                     );
                     state.config.fallback_active = false;
-                    crate::config::save_config(&state.config);
+                    state.save_settings_to_disk();
                 }
             }
         } else {
@@ -364,7 +391,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             fallback_pos.y.round() as i32,
                         );
                         state.config.fallback_active = true;
-                        crate::config::save_config(&state.config);
+                        state.save_settings_to_disk();
                     }
                 }
             }
@@ -392,7 +419,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     ));
                     state.config.fallback_active = false;
                     state.window_pos = Some([phys.min.x, phys.min.y]);
-                    crate::config::save_config(&state.config);
+                    state.save_settings_to_disk();
                 }
             }
         }
@@ -464,7 +491,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let close_rect = Rect::from_center_size(close_center, Vec2::new(14.0, 14.0));
     let close_resp = ui.interact(close_rect, ui.scope_id().with("gadget_close_btn"), Sense::click());
     if close_resp.clicked() {
-        crate::config::save_config(&state.config);
+        state.save_settings_to_disk();
         state.uptime_history.force_save();
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -506,7 +533,12 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     );
 
     // Заголовок после кнопки обновления, обрезается при узком окне перед кнопками справа
-    let title_text = truncate_text("Netmon Widget", (drag_rect.width() - 4.0).max(8.0), 11.0);
+    let title_text = truncate_text(
+        ui.painter(),
+        "Netmon Widget",
+        (drag_rect.width() - 4.0).max(8.0),
+        11.0,
+    );
     ui.painter().with_clip_rect(drag_rect).text(
         Pos2::new(drag_rect.left() + 2.0, bar_rect.center().y),
         Align2::LEFT_CENTER,
@@ -677,7 +709,8 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
 
                     // Имя хоста слева (с отступом x = 9px)
                     let max_text_width = (row_rect.width() - 32.0).max(20.0);
-                    let display_name = truncate_text(&check.config.name, max_text_width, fs);
+                    let display_name =
+                        truncate_text(ui.painter(), &check.config.name, max_text_width, fs);
 
                     ui.painter().text(
                         Pos2::new(row_rect.left() + 9.0, row_rect.center().y),
@@ -888,21 +921,23 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                         _ => None,
                     });
 
-                    let update_ready = matches!(
-                        state.update_status,
-                        crate::updater::UpdateStatus::ReadyToRestart(_)
-                    );
+                    let menu_opts = crate::ui::menu::native::PopupMenuState {
+                        lang: state.config.language,
+                        is_dark,
+                        always_on_top: state.config.always_on_top,
+                        minimized: state.minimized_to_tray,
+                        hide_taskbar: state.config.hide_taskbar,
+                        update_ready: matches!(
+                            state.update_status,
+                            crate::updater::UpdateStatus::ReadyToRestart(_)
+                        ),
+                        interval_sec: state.config.interval_sec,
+                    };
                     let action = if let Some((si, ci)) = hit_check {
                         let name = state.sections[si].checks[ci].config.name.clone();
                         let sec_name = state.sections[si].name.clone();
                         crate::ui::menu::native::show_popup(
-                            state.config.language,
-                            is_dark,
-                            state.config.always_on_top,
-                            state.minimized_to_tray,
-                            state.config.hide_taskbar,
-                            update_ready,
-                            state.config.interval_sec,
+                            menu_opts,
                             crate::ui::menu::native::MenuTarget::Check {
                                 sec_idx: si,
                                 chk_idx: ci,
@@ -913,13 +948,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     } else if let Some(si) = hit_section {
                         let name = state.sections[si].name.clone();
                         crate::ui::menu::native::show_popup(
-                            state.config.language,
-                            is_dark,
-                            state.config.always_on_top,
-                            state.minimized_to_tray,
-                            state.config.hide_taskbar,
-                            update_ready,
-                            state.config.interval_sec,
+                            menu_opts,
                             crate::ui::menu::native::MenuTarget::Section {
                                 sec_idx: si,
                                 name: &name,
@@ -927,13 +956,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                         )
                     } else {
                         crate::ui::menu::native::show_popup(
-                            state.config.language,
-                            is_dark,
-                            state.config.always_on_top,
-                            state.minimized_to_tray,
-                            state.config.hide_taskbar,
-                            update_ready,
-                            state.config.interval_sec,
+                            menu_opts,
                             crate::ui::menu::native::MenuTarget::EmptyArea,
                         )
                     };
@@ -980,7 +1003,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     if state.is_checking {
         ctx.request_repaint_after(std::time::Duration::from_millis(30));
     } else {
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        ctx.request_repaint_after(std::time::Duration::from_millis(1000));
     }
 }
 
@@ -1156,15 +1179,43 @@ fn draw_arc_with_arrow(
     painter.line_segment([tip, barb2], Stroke::new(1.3, color));
 }
 
-/// Обрезает длинный текст с добавлением многоточия
-fn truncate_text(text: &str, max_width_px: f32, font_size: f32) -> String {
-    let approx_char_width = font_size * 0.58;
-    let max_chars = (max_width_px / approx_char_width).floor() as usize;
-    if text.chars().count() > max_chars && max_chars > 3 {
-        let mut s: String = text.chars().take(max_chars - 1).collect();
+/// Обрезает длинный текст с добавлением многоточия по фактической ширине глифов
+fn truncate_text(painter: &egui::Painter, text: &str, max_width_px: f32, font_size: f32) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let font_id = FontId::proportional(font_size);
+    if painter
+        .layout_no_wrap(text.to_string(), font_id.clone(), egui::Color32::WHITE)
+        .size()
+        .x
+        <= max_width_px
+    {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut lo = 0usize;
+    let mut hi = chars.len();
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let mut candidate: String = chars[..mid].iter().collect();
+        candidate.push('…');
+        if painter
+            .layout_no_wrap(candidate, font_id.clone(), egui::Color32::WHITE)
+            .size()
+            .x
+            <= max_width_px
+        {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if lo == 0 {
+        '…'.to_string()
+    } else {
+        let mut s: String = chars[..lo].iter().collect();
         s.push('…');
         s
-    } else {
-        text.to_string()
     }
 }

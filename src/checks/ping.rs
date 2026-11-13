@@ -1,5 +1,5 @@
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
-use std::time::Duration;
+use std::net::{IpAddr, Ipv4Addr};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -43,16 +43,43 @@ extern "system" {
     ) -> u32;
 }
 
-fn resolve_ipv4(host: &str) -> Option<Ipv4Addr> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
+fn clean_host(host: &str) -> &str {
+    let mut h = host.trim();
+    if let Some(rest) = h.strip_prefix("https://").or_else(|| h.strip_prefix("http://")) {
+        h = rest;
+    }
+    if let Some((before_slash, _)) = h.split_once('/') {
+        h = before_slash;
+    }
+    if let Some(stripped) = h.strip_prefix('[') {
+        if let Some((inside, _)) = stripped.split_once(']') {
+            return inside;
+        }
+    }
+    if h.matches(':').count() == 1 {
+        if let Some((host_only, port_part)) = h.split_once(':') {
+            if !port_part.is_empty() && port_part.chars().all(|c| c.is_ascii_digit()) {
+                return host_only;
+            }
+        }
+    }
+    h
+}
+
+async fn resolve_ipv4(host: &str, timeout: Duration) -> Option<Ipv4Addr> {
+    let clean = clean_host(host);
+    if clean.is_empty() {
+        return None;
+    }
+    if let Ok(ip) = clean.parse::<IpAddr>() {
         return match ip {
             IpAddr::V4(v4) => Some(v4),
-            _ => None,
+            IpAddr::V6(_) => None,
         };
     }
-    let addr = format!("{}:0", host);
-    if let Ok(mut iter) = addr.to_socket_addrs() {
-        while let Some(sa) = iter.next() {
+    if let Ok(Ok(addrs)) = tokio::time::timeout(timeout, tokio::net::lookup_host((clean, 0))).await
+    {
+        for sa in addrs {
             if let IpAddr::V4(v4) = sa.ip() {
                 return Some(v4);
             }
@@ -62,18 +89,18 @@ fn resolve_ipv4(host: &str) -> Option<Ipv4Addr> {
 }
 
 #[cfg(target_os = "windows")]
-pub async fn ping(host: &str, timeout: Duration) -> Result<(), String> {
-    let host = host.to_string();
-    let timeout_ms = timeout.as_millis() as u32;
-    tokio::task::spawn_blocking(move || ping_windows(&host, timeout_ms))
+pub async fn ping(host: &str, timeout: Duration) -> Result<u64, String> {
+    let ip = resolve_ipv4(host, timeout)
+        .await
+        .ok_or_else(|| "cannot resolve IPv4".to_string())?;
+    let timeout_ms = timeout.as_millis().clamp(1, u32::MAX as u128) as u32;
+    tokio::task::spawn_blocking(move || ping_windows(ip, timeout_ms))
         .await
         .map_err(|e| format!("join error: {}", e))?
 }
 
 #[cfg(target_os = "windows")]
-fn ping_windows(host: &str, timeout_ms: u32) -> Result<(), String> {
-    let ip = resolve_ipv4(host).ok_or_else(|| "cannot resolve IPv4".to_string())?;
-
+fn ping_windows(ip: Ipv4Addr, timeout_ms: u32) -> Result<u64, String> {
     unsafe {
         let handle = IcmpCreateFile();
         if handle.is_null() {
@@ -83,6 +110,7 @@ fn ping_windows(host: &str, timeout_ms: u32) -> Result<(), String> {
         let request_data: [u8; 32] = [0xAB; 32];
         let mut reply_buf = vec![0u8; std::mem::size_of::<IcmpEchoReply>() + request_data.len() + 8];
 
+        let start = Instant::now();
         let ret = IcmpSendEcho(
             handle,
             u32::from(ip).to_be(),
@@ -93,6 +121,7 @@ fn ping_windows(host: &str, timeout_ms: u32) -> Result<(), String> {
             reply_buf.len() as u32,
             timeout_ms,
         );
+        let elapsed_ms = ((start.elapsed().as_micros() + 500) / 1000) as u64;
 
         IcmpCloseHandle(handle);
 
@@ -105,18 +134,20 @@ fn ping_windows(host: &str, timeout_ms: u32) -> Result<(), String> {
         if reply.status != 0 {
             return Err(format!("icmp status: {}", reply.status));
         }
-        Ok(())
+        Ok(elapsed_ms)
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub async fn ping(host: &str, timeout: Duration) -> Result<(), String> {
+pub async fn ping(host: &str, timeout: Duration) -> Result<u64, String> {
     use tokio::net::TcpStream;
     use tokio::time::timeout as tokio_timeout;
+    let clean = clean_host(host);
+    let start = Instant::now();
     for port in [443u16, 80u16] {
-        let addr = format!("{}:{}", host, port);
+        let addr = format!("{}:{}", clean, port);
         if let Ok(Ok(_)) = tokio_timeout(timeout, TcpStream::connect(&addr)).await {
-            return Ok(());
+            return Ok(((start.elapsed().as_micros() + 500) / 1000) as u64);
         }
     }
     Err("host unreachable (tcp fallback)".to_string())

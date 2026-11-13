@@ -1,3 +1,5 @@
+#![cfg_attr(all(not(debug_assertions), not(test)), windows_subsystem = "windows")]
+
 mod checks;
 mod config;
 mod history;
@@ -26,32 +28,7 @@ struct NetmonApp {
     update_evt_rx: UnboundedReceiver<updater::UpdateEvent>,
     last_hide_taskbar: bool,
     initial_phys_pos: Option<[i32; 2]>,
-}
-
-impl NetmonApp {
-    fn new(
-        rx: UnboundedReceiver<CheckUpdate>,
-        trigger_tx: tokio::sync::mpsc::UnboundedSender<()>,
-        cfg_tx: tokio::sync::watch::Sender<crate::config::AppConfig>,
-        tray_rx: mpsc::Receiver<tray::TrayCommand>,
-        update_cmd_tx: tokio::sync::mpsc::UnboundedSender<updater::UpdateCommand>,
-        update_evt_rx: UnboundedReceiver<updater::UpdateEvent>,
-        app_state: Arc<Mutex<AppState>>,
-        initial_hide_taskbar: bool,
-        initial_phys_pos: Option<[i32; 2]>,
-    ) -> Self {
-        Self {
-            state: app_state,
-            rx,
-            trigger_tx,
-            cfg_tx,
-            tray_rx,
-            update_cmd_tx,
-            update_evt_rx,
-            last_hide_taskbar: initial_hide_taskbar,
-            initial_phys_pos,
-        }
-    }
+    restarting_for_update: bool,
 }
 
 impl eframe::App for NetmonApp {
@@ -81,9 +58,10 @@ impl eframe::App for NetmonApp {
                 CheckUpdate::Result {
                     section_idx,
                     check_idx,
+                    check_key,
                     result,
                 } => {
-                    st.apply_result(section_idx, check_idx, result);
+                    st.apply_result_checked(section_idx, check_idx, &check_key, result);
                 }
                 CheckUpdate::Finished => {
                     st.is_checking = false;
@@ -111,7 +89,7 @@ impl eframe::App for NetmonApp {
             ui::widget::draw(ui, &mut st);
         } else {
             ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(250));
+                .request_repaint_after(std::time::Duration::from_millis(1000));
         }
 
         if st.show_settings {
@@ -147,10 +125,7 @@ impl eframe::App for NetmonApp {
             match evt {
                 updater::UpdateEvent::CheckedAt(ts) => {
                     st.config.last_update_check_ts = ts;
-                    crate::config::save_config(&st.config);
-                    st.config_modified = std::fs::metadata(crate::config::config_path())
-                        .and_then(|m| m.modified())
-                        .ok();
+                    st.save_settings_to_disk();
                 }
                 updater::UpdateEvent::Status(status) => {
                     st.update_status = status;
@@ -174,9 +149,10 @@ impl eframe::App for NetmonApp {
         if st.restart_for_update_requested {
             st.restart_for_update_requested = false;
             st.uptime_history.force_save();
-            crate::config::save_config(&st.config);
+            st.save_settings_to_disk();
             match updater::apply_staged_and_restart() {
                 Ok(true) => {
+                    self.restarting_for_update = true;
                     ui.ctx()
                         .send_viewport_cmd(eframe::egui::ViewportCommand::Close);
                 }
@@ -190,9 +166,11 @@ impl eframe::App for NetmonApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         ui::tooltip::hide();
-        let mut st = self.state.lock().unwrap();
-        st.uptime_history.force_save();
-        crate::config::save_config(&st.config);
+        if !self.restarting_for_update {
+            let mut st = self.state.lock().unwrap();
+            st.uptime_history.force_save();
+            st.save_settings_to_disk();
+        }
     }
 }
 
@@ -265,7 +243,7 @@ fn main() -> eframe::Result<()> {
         + cfg
             .sections
             .iter()
-            .map(|s| 12.0 + s.checks.len() as f32 * 17.5)
+            .map(|s| cfg.size.header_height() + s.checks.len() as f32 * cfg.size.row_height())
             .sum::<f32>()
         + 4.0;
     let initial_width = cfg.custom_width.unwrap_or_else(|| cfg.size.width());
@@ -340,12 +318,16 @@ fn main() -> eframe::Result<()> {
     let (update_cmd_tx, update_cmd_rx) = unbounded_channel::<updater::UpdateCommand>();
     let (update_evt_tx, update_evt_rx) = unbounded_channel::<updater::UpdateEvent>();
 
+    let egui_ctx_slot: Arc<Mutex<Option<eframe::egui::Context>>> = Arc::new(Mutex::new(None));
     let app_state = Arc::new(Mutex::new(AppState::from_config(&cfg)));
     let _guard = rt.enter();
-    scheduler::spawn_scheduler(cfg_rx, tx, trigger_rx);
-    updater::spawn_updater(update_cmd_rx, cfg_rx_upd, update_evt_tx);
-
-    let egui_ctx_slot: Arc<Mutex<Option<eframe::egui::Context>>> = Arc::new(Mutex::new(None));
+    scheduler::spawn_scheduler(cfg_rx, tx, trigger_rx, egui_ctx_slot.clone());
+    updater::spawn_updater(
+        update_cmd_rx,
+        cfg_rx_upd,
+        update_evt_tx,
+        egui_ctx_slot.clone(),
+    );
 
     #[cfg(target_os = "windows")]
     {
@@ -395,17 +377,18 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             setup_custom_fonts(&cc.egui_ctx);
             *egui_ctx_slot.lock().unwrap() = Some(cc.egui_ctx.clone());
-            Ok(Box::new(NetmonApp::new(
+            Ok(Box::new(NetmonApp {
+                state: state_for_app,
                 rx,
                 trigger_tx,
                 cfg_tx,
                 tray_rx,
                 update_cmd_tx,
                 update_evt_rx,
-                state_for_app,
-                initial_hide_taskbar,
+                last_hide_taskbar: initial_hide_taskbar,
                 initial_phys_pos,
-            )))
+                restarting_for_update: false,
+            }))
         }),
     )
 }

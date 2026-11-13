@@ -1,3 +1,5 @@
+#![allow(clippy::upper_case_acronyms)]
+
 use crate::history::{UptimeWindows, WindowUptime};
 use crate::i18n::{tr, Language};
 use crate::state::CheckState;
@@ -338,17 +340,21 @@ mod win {
         scale: f32,
         is_dark: bool,
         last_rect: (i32, i32, i32, i32),
+        last_anchor: (i32, i32, i32, i32),
     }
 
     thread_local! {
-        static TIP: RefCell<TooltipState> = RefCell::new(TooltipState {
-            hwnd: std::ptr::null_mut(),
-            visible: false,
-            content: None,
-            scale: 1.0,
-            is_dark: true,
-            last_rect: (0, 0, 0, 0),
-        });
+        static TIP: RefCell<TooltipState> = const {
+            RefCell::new(TooltipState {
+                hwnd: std::ptr::null_mut(),
+                visible: false,
+                content: None,
+                scale: 1.0,
+                is_dark: true,
+                last_rect: (0, 0, 0, 0),
+                last_anchor: (0, 0, 0, 0),
+            })
+        };
     }
 
     unsafe fn make_font(height_px: i32, bold: bool) -> HFONT {
@@ -391,25 +397,10 @@ mod win {
         (rc.right - rc.left, rc.bottom - rc.top)
     }
 
-    unsafe fn draw_line(
-        hdc: HDC,
-        font: HFONT,
-        color: DWORD,
-        text: &str,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-    ) {
+    unsafe fn draw_line(hdc: HDC, font: HFONT, color: DWORD, text: &str, mut rc: RECT) {
         let old = SelectObject(hdc, font as HGDIOBJ);
         SetTextColor(hdc, color);
         let wide: Vec<u16> = text.encode_utf16().collect();
-        let mut rc = RECT {
-            left: x,
-            top: y,
-            right: x + w,
-            bottom: y + h,
-        };
         DrawTextW(
             hdc,
             wide.as_ptr(),
@@ -531,16 +522,20 @@ mod win {
                         let font_body = make_font((11.5 * scale).round() as i32, false);
                         let font_small = make_font((10.5 * scale).round() as i32, false);
 
+                        let line_rect = |top: i32, h: i32| RECT {
+                            left: pad_x,
+                            top,
+                            right: pad_x + text_w,
+                            bottom: top + h,
+                        };
+
                         let (_, th) = measure_line(hdc, font_title, &c.title_line, text_w);
                         draw_line(
                             hdc,
                             font_title,
                             title_c,
                             &c.title_line,
-                            pad_x,
-                            y,
-                            text_w,
-                            th,
+                            line_rect(y, th),
                         );
                         y += th + gap;
 
@@ -550,10 +545,7 @@ mod win {
                             font_body,
                             target_c,
                             &c.target_line,
-                            pad_x,
-                            y,
-                            text_w,
-                            tgh,
+                            line_rect(y, tgh),
                         );
                         y += tgh + gap;
 
@@ -564,17 +556,14 @@ mod win {
                             font_body,
                             rgb(sr, sg, sb),
                             &c.status_line,
-                            pad_x,
-                            y,
-                            text_w,
-                            sh,
+                            line_rect(y, sh),
                         );
                         y += sh + gap;
 
                         if let Some(err) = &c.error_line {
                             let (_, eh) = measure_line(hdc, font_small, err, text_w);
                             let err_color = if c.optional_tag { err_opt_c } else { err_crit_c };
-                            draw_line(hdc, font_small, err_color, err, pad_x, y, text_w, eh);
+                            draw_line(hdc, font_small, err_color, err, line_rect(y, eh));
                             y += eh + gap;
                         }
 
@@ -585,10 +574,7 @@ mod win {
                                 font_small,
                                 stats_c,
                                 stats,
-                                pad_x,
-                                y,
-                                text_w,
-                                fh,
+                                line_rect(y, fh),
                             );
                             y += fh + gap;
                         }
@@ -600,10 +586,7 @@ mod win {
                                 font_small,
                                 up_c,
                                 up,
-                                pad_x,
-                                y,
-                                text_w,
-                                uh,
+                                line_rect(y, uh),
                             );
                         }
 
@@ -679,12 +662,25 @@ mod win {
 
             let content = build_content(check, windows, lang, is_dark);
             let scale = scale.max(1.0);
-            let (tip_w, tip_h) = compute_layout(hwnd, &content, scale);
 
             // Экранные координаты строки и окна гаджета (в физических пикселях для Win32)
             let win_left = ((window_outer.left()) * scale).round() as i32;
             let win_right = ((window_outer.right()) * scale).round() as i32;
             let row_top = ((window_outer.top() + row_rect.top()) * scale).round() as i32;
+            let anchor = (win_left, win_right, row_top, (scale * 100.0).round() as i32);
+
+            let already_up_to_date = TIP.with(|cell| {
+                let st = cell.borrow();
+                st.visible
+                    && st.content.as_ref() == Some(&content)
+                    && st.is_dark == is_dark
+                    && st.last_anchor == anchor
+            });
+            if already_up_to_date {
+                return;
+            }
+
+            let (tip_w, tip_h) = compute_layout(hwnd, &content, scale);
 
             let monitors = crate::monitor::get_all_monitors();
             let phys_outer = Rect::from_min_max(
@@ -727,6 +723,7 @@ mod win {
                     st.scale = scale;
                     st.is_dark = is_dark;
                     st.last_rect = new_rect;
+                    st.last_anchor = anchor;
                     st.visible = true;
                     SetWindowPos(
                         hwnd,
@@ -740,6 +737,8 @@ mod win {
                     if changed_content {
                         InvalidateRect(hwnd, std::ptr::null(), 1);
                     }
+                } else {
+                    st.last_anchor = anchor;
                 }
             });
         }
@@ -751,6 +750,7 @@ mod win {
             if st.visible && !st.hwnd.is_null() {
                 st.visible = false;
                 st.content = None;
+                st.last_anchor = (0, 0, 0, 0);
                 unsafe {
                     ShowWindow(st.hwnd, SW_HIDE);
                 }

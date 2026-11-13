@@ -84,8 +84,17 @@ pub async fn resolve(host: &str, port: u16, timeout: Duration) -> Result<(), Str
     }
 
     // Если указано доменное имя, резолвим без локального кеша через system/default DNS.
-    let (cfg, mut opts) = trust_dns_resolver::system_conf::read_system_conf()
+    let (mut cfg, mut opts) = trust_dns_resolver::system_conf::read_system_conf()
         .unwrap_or_else(|_| (ResolverConfig::default(), ResolverOpts::default()));
+    if port > 0 && port != 53 {
+        let mut custom = ResolverConfig::new();
+        for ns in cfg.name_servers() {
+            let mut ns_cfg = ns.clone();
+            ns_cfg.socket_addr.set_port(port);
+            custom.add_name_server(ns_cfg);
+        }
+        cfg = custom;
+    }
     opts.cache_size = 0;
     opts.use_hosts_file = false;
     opts.timeout = timeout;

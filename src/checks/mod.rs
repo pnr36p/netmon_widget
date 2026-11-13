@@ -14,16 +14,24 @@ pub async fn run_check(cfg: &CheckConfig) -> CheckResult {
     let port = cfg.effective_port();
     let timeout = std::time::Duration::from_millis(cfg.timeout_ms);
 
-    let outcome: Result<(), String> = match kind {
-        "ping" => ping::ping(&host, timeout).await,
-        "https" => https::check(&host, port, true, timeout).await,
-        "http" => https::check(&host, port, false, timeout).await,
-        "dns" => dns::resolve(&host, port, timeout).await,
-        "tcp" => tcp::connect(&host, port, timeout).await,
-        other => Err(format!("unknown check type: {}", other)),
+    let (outcome, latency): (Result<(), String>, u64) = match kind {
+        "ping" => match ping::ping(&host, timeout).await {
+            Ok(ms) => (Ok(()), ms),
+            Err(e) => (Err(e), 0),
+        },
+        _ => {
+            let outcome = match kind {
+                "https" => https::check(&host, port, true, timeout).await,
+                "http" => https::check(&host, port, false, timeout).await,
+                "dns" => dns::resolve(&host, port, timeout).await,
+                "tcp" => tcp::connect(&host, port, timeout).await,
+                other => Err(format!("unknown check type: {}", other)),
+            };
+            let ms = ((start.elapsed().as_micros() + 500) / 1000) as u64;
+            (outcome, ms)
+        }
     };
 
-    let latency = ((start.elapsed().as_micros() + 500) / 1000) as u64;
     match outcome {
         Ok(()) => CheckResult {
             ok: true,

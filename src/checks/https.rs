@@ -1,4 +1,18 @@
+use std::sync::OnceLock;
 use std::time::Duration;
+
+fn shared_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    let res = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(false)
+            .pool_max_idle_per_host(0)
+            .user_agent(concat!("netmon_widget/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| e.to_string())
+    });
+    res.as_ref().map_err(|e| e.clone())
+}
 
 pub async fn check(host: &str, port: u16, use_https: bool, timeout: Duration) -> Result<(), String> {
     let trimmed = host.trim();
@@ -19,13 +33,13 @@ pub async fn check(host: &str, port: u16, use_https: bool, timeout: Duration) ->
         }
     };
 
-    let client = reqwest::Client::builder()
+    let client = shared_http_client()?;
+    let resp = client
+        .get(&url)
         .timeout(timeout)
-        .danger_accept_invalid_certs(false)
-        .build()
+        .send()
+        .await
         .map_err(|e| e.to_string())?;
-
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if resp.status().is_success() || resp.status().is_redirection() {
         Ok(())
     } else {

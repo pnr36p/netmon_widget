@@ -1,3 +1,5 @@
+#![allow(clippy::upper_case_acronyms)]
+
 use crate::state::{AppState, OverallStatus, StatusSummary, TrayNotification, TrayNotifyLevel};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -490,7 +492,7 @@ unsafe fn create_hicon_from_rgba(rgba: &[u8], size: u32) -> HICON {
 
     let pixel_count = (size * size) as usize;
     let dst = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, pixel_count * 4);
-    let stride_bytes = ((size + 31) / 32 * 4) as usize;
+    let stride_bytes = (size.div_ceil(32) * 4) as usize;
     let mut mask_bits = vec![0u8; stride_bytes * size as usize];
 
     for y in 0..size as usize {
@@ -602,7 +604,8 @@ unsafe fn run_tray(
         guid_item: [0u8; 16],
         h_balloon_icon: std::ptr::null_mut(),
     };
-    write_wide_buf(&mut nid.sz_tip, "NetMon Widget — Запуск…");
+    let init_lang = state.lock().unwrap().config.language;
+    write_wide_buf(&mut nid.sz_tip, crate::i18n::tr(init_lang).tray_starting);
     Shell_NotifyIconW(NIM_ADD, &mut nid);
 
     let mut apply_tray = |summary: &StatusSummary, lang: crate::i18n::Language, update_icon: bool| {
@@ -675,29 +678,23 @@ unsafe fn run_tray(
         if msg.message == WM_APP + 1 || msg.message == WM_APP + 2 {
             let lparam = msg.l_param as u32;
             if lparam == WM_LBUTTONUP || lparam == WM_RBUTTONUP {
-                let (aot, minimized, hide_taskbar, update_ready, lang, is_dark, interval_sec) = {
+                let opts = {
                     let st = state.lock().unwrap();
-                    (
-                        st.config.always_on_top,
-                        st.minimized_to_tray,
-                        st.config.hide_taskbar,
-                        matches!(
+                    crate::ui::menu::native::PopupMenuState {
+                        lang: st.config.language,
+                        is_dark: st.config.theme.resolve_is_dark(),
+                        always_on_top: st.config.always_on_top,
+                        minimized: st.minimized_to_tray,
+                        hide_taskbar: st.config.hide_taskbar,
+                        update_ready: matches!(
                             st.update_status,
                             crate::updater::UpdateStatus::ReadyToRestart(_)
                         ),
-                        st.config.language,
-                        st.config.theme.resolve_is_dark(),
-                        st.config.interval_sec,
-                    )
+                        interval_sec: st.config.interval_sec,
+                    }
                 };
                 if let Some(act) = crate::ui::menu::native::show_popup(
-                    lang,
-                    is_dark,
-                    aot,
-                    minimized,
-                    hide_taskbar,
-                    update_ready,
-                    interval_sec,
+                    opts,
                     crate::ui::menu::native::MenuTarget::Tray,
                 ) {
                     let _ = tx.send(TrayCommand::Menu(act));

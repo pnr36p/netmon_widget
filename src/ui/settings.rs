@@ -1,4 +1,4 @@
-use crate::config::{save_config, SizePreset};
+use crate::config::SizePreset;
 use crate::i18n::{tr, Language, ThemeMode};
 use crate::state::AppState;
 use crate::updater::{UpdateStatus, CURRENT_VERSION};
@@ -140,8 +140,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
             }
 
             if ctx.input(|i| i.viewport().close_requested()) {
-                state.config.opacity = state.opacity;
-                save_config(&state.config);
+                state.save_settings_to_disk();
                 state.show_settings = false;
             }
 
@@ -175,8 +174,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                     ui.spacing_mut().button_padding = Vec2::new(14.0, 6.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(s.btn_close).clicked() {
-                            state.config.opacity = state.opacity;
-                            save_config(&state.config);
+                            state.save_settings_to_disk();
                             state.show_settings = false;
                         }
                         if accent_button(
@@ -186,8 +184,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                         )
                         .clicked()
                         {
-                            state.config.opacity = state.opacity;
-                            save_config(&state.config);
+                            state.save_settings_to_disk();
                             state.show_settings = false;
                         }
                     });
@@ -329,11 +326,16 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                                         ui.end_row();
 
                                         ui.label(s.settings_opacity);
-                                        ui.add(
-                                            egui::Slider::new(&mut state.opacity, 0.2..=1.0)
-                                                .fixed_decimals(2)
-                                                .show_value(true),
-                                        );
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(&mut state.opacity, 0.2..=1.0)
+                                                    .fixed_decimals(2)
+                                                    .show_value(true),
+                                            )
+                                            .changed()
+                                        {
+                                            state.config.opacity = state.opacity;
+                                        }
                                         ui.end_row();
                                     });
                             });
@@ -381,7 +383,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                                 {
                                     state.config.edge_snapping = edge_snap;
                                     crate::platform::set_edge_snapping(edge_snap);
-                                    save_config(&state.config);
+                                    state.save_settings_to_disk();
                                 }
 
                                 let mut hide_taskbar = state.config.hide_taskbar;
@@ -391,7 +393,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                                 {
                                     state.config.hide_taskbar = hide_taskbar;
                                     crate::platform::set_skip_taskbar(hide_taskbar);
-                                    save_config(&state.config);
+                                    state.save_settings_to_disk();
                                 }
 
                                 let mut auto = state.autostart_enabled;
@@ -417,7 +419,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                                 if ui.checkbox(&mut auto_upd, s.settings_auto_update).changed() {
                                     state.config.auto_update = auto_upd;
                                     state.scheduler_needs_sync = true;
-                                    save_config(&state.config);
+                                    state.save_settings_to_disk();
                                 }
 
                                 ui.add_space(2.0);

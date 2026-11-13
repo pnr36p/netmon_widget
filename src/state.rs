@@ -217,7 +217,11 @@ impl AppState {
     /// Проверяет, изменился ли файл .toml на диске, и при необходимости перезагружает хосты.
     pub fn reload_if_modified(&mut self) -> bool {
         let path = crate::config::config_path();
-        if let Ok(meta) = std::fs::metadata(&path) {
+        self.reload_from_path_if_modified(&path)
+    }
+
+    pub fn reload_from_path_if_modified(&mut self, path: &std::path::Path) -> bool {
+        if let Ok(meta) = std::fs::metadata(path) {
             if let Ok(mtime) = meta.modified() {
                 if self.config_modified.is_none() {
                     self.config_modified = Some(mtime);
@@ -225,9 +229,13 @@ impl AppState {
                 }
                 if Some(mtime) != self.config_modified {
                     self.config_modified = Some(mtime);
-                    let new_cfg = crate::config::load_config();
-                    self.apply_new_config(new_cfg);
-                    return true;
+                    if let Ok(mut new_cfg) = crate::config::try_load_config_from(path) {
+                        if new_cfg.sections.is_empty() && !self.config.sections.is_empty() {
+                            new_cfg.sections = self.config.sections.clone();
+                        }
+                        self.apply_new_config(new_cfg);
+                        return true;
+                    }
                 }
             }
         }
@@ -247,7 +255,22 @@ impl AppState {
                     .sections
                     .iter()
                     .flat_map(|sec| sec.checks.iter())
-                    .find(|ch| ch.config.host == c.host && ch.config.base_kind() == c.base_kind());
+                    .find(|ch| {
+                        ch.config.name == c.name
+                            && ch.config.host == c.host
+                            && ch.config.base_kind() == c.base_kind()
+                            && ch.config.effective_port() == c.effective_port()
+                    })
+                    .or_else(|| {
+                        self.sections
+                            .iter()
+                            .flat_map(|sec| sec.checks.iter())
+                            .find(|ch| {
+                                ch.config.host == c.host
+                                    && ch.config.base_kind() == c.base_kind()
+                                    && ch.config.effective_port() == c.effective_port()
+                            })
+                    });
 
                 checks.push(CheckState {
                     config: c.clone(),
@@ -263,6 +286,34 @@ impl AppState {
             });
         }
         self.sections = new_sections;
+    }
+
+    pub fn apply_result_checked(
+        &mut self,
+        section_idx: usize,
+        check_idx: usize,
+        check_key: &str,
+        res: CheckResult,
+    ) {
+        let matches_at_idx = self
+            .sections
+            .get(section_idx)
+            .and_then(|sec| sec.checks.get(check_idx))
+            .is_some_and(|ch| crate::history::check_history_key(&ch.config) == check_key);
+
+        if matches_at_idx {
+            self.apply_result(section_idx, check_idx, res);
+            return;
+        }
+
+        for (si, sec) in self.sections.iter().enumerate() {
+            for (ci, ch) in sec.checks.iter().enumerate() {
+                if crate::history::check_history_key(&ch.config) == check_key {
+                    self.apply_result(si, ci, res);
+                    return;
+                }
+            }
+        }
     }
 
     pub fn apply_result(&mut self, section_idx: usize, check_idx: usize, res: CheckResult) {
@@ -290,7 +341,16 @@ impl AppState {
         }
     }
 
+    pub fn save_settings_to_disk(&mut self) {
+        self.config.opacity = self.opacity;
+        crate::config::save_config(&self.config);
+        self.config_modified = std::fs::metadata(crate::config::config_path())
+            .and_then(|m| m.modified())
+            .ok();
+    }
+
     pub fn sync_config_to_disk(&mut self) {
+        self.config.opacity = self.opacity;
         crate::config::save_config_with_sections(&self.config);
         self.config_modified = std::fs::metadata(crate::config::config_path())
             .and_then(|m| m.modified())
@@ -418,6 +478,7 @@ pub enum CheckUpdate {
     Result {
         section_idx: usize,
         check_idx: usize,
+        check_key: String,
         result: CheckResult,
     },
     Finished,
@@ -772,5 +833,55 @@ type = "ping"
         assert_eq!(st.pending_notifications.len(), 1);
         let n2 = st.pending_notifications.pop_front().unwrap();
         assert_eq!(n2.level, TrayNotifyLevel::Info);
+    }
+
+    #[test]
+    fn reload_ignores_corrupted_toml_and_preserves_state() {
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "netmon_widget_reload_test_{}_{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        path.push(unique);
+
+        let initial_cfg = AppConfig {
+            interval_sec: 15,
+            sections: vec![SectionConfig {
+                name: "Core".into(),
+                checks: vec![make_check("GW", "ping", false)],
+            }],
+            ..Default::default()
+        };
+        std::fs::write(&path, toml::to_string_pretty(&initial_cfg).unwrap()).unwrap();
+
+        let mut st = AppState::from_config(&initial_cfg);
+        st.config_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        assert!(!st.reload_from_path_if_modified(&path));
+        assert!(st.config_modified.is_some());
+
+        // Overwrite with invalid TOML and advance mtime so hot-reload triggers.
+        std::fs::write(&path, "interval_sec = [broken toml").unwrap();
+        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+            let _ = file.set_modified(
+                std::time::SystemTime::now() + std::time::Duration::from_secs(5),
+            );
+        }
+
+        let reloaded = st.reload_from_path_if_modified(&path);
+        let _ = std::fs::remove_file(&path);
+        let mut bak = path.clone();
+        bak.set_extension("toml.bak");
+        let _ = std::fs::remove_file(&bak);
+
+        assert!(!reloaded);
+        assert_eq!(st.config.interval_sec, 15);
+        assert_eq!(st.sections.len(), 1);
+        assert_eq!(st.sections[0].name, "Core");
+        assert_eq!(st.sections[0].checks.len(), 1);
+        assert_eq!(st.sections[0].checks[0].config.name, "GW");
     }
 }
