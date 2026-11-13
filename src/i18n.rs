@@ -65,6 +65,9 @@ pub struct Strings {
     // Настройки
     pub settings_title: &'static str,
     pub settings_heading: &'static str,
+    pub settings_sec_appearance: &'static str,
+    pub settings_sec_behavior: &'static str,
+    pub settings_sec_updates: &'static str,
     pub settings_language: &'static str,
     pub settings_theme: &'static str,
     pub theme_system: &'static str,
@@ -178,6 +181,9 @@ const RU: Strings = Strings {
 
     settings_title: "Настройки Netmon Widget",
     settings_heading: "Настройки виджета",
+    settings_sec_appearance: "Внешний вид",
+    settings_sec_behavior: "Поведение и опрос",
+    settings_sec_updates: "Обновления",
     settings_language: "Язык / Language:",
     settings_theme: "Тема оформления:",
     theme_system: "Системная",
@@ -287,6 +293,9 @@ const EN: Strings = Strings {
 
     settings_title: "Netmon Widget Settings",
     settings_heading: "Widget Settings",
+    settings_sec_appearance: "Appearance",
+    settings_sec_behavior: "Behavior & Polling",
+    settings_sec_updates: "Updates",
     settings_language: "Language:",
     settings_theme: "Theme:",
     theme_system: "System default",
@@ -396,6 +405,9 @@ const HR: Strings = Strings {
 
     settings_title: "Postavke Netmon Widget",
     settings_heading: "Postavke widgeta",
+    settings_sec_appearance: "Izgled",
+    settings_sec_behavior: "Ponašanje i provjera",
+    settings_sec_updates: "Ažuriranja",
     settings_language: "Jezik:",
     settings_theme: "Tema:",
     theme_system: "Prema sustavu",

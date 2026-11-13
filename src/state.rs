@@ -300,9 +300,11 @@ impl AppState {
 
     pub fn open_settings(&mut self) {
         if !self.show_settings {
+            let size =
+                crate::ui::settings::clamped_window_size(self.config.language, self.main_outer_rect);
             self.settings_open_pos = crate::monitor::place_child_near_main(
                 self.main_outer_rect,
-                eframe::egui::Vec2::new(380.0, 505.0),
+                size,
                 self.config.settings_window_pos,
             );
             self.show_settings = true;
