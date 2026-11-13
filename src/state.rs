@@ -144,7 +144,7 @@ pub struct AppState {
     pub manual_refresh_requested: bool,
     pub scheduler_needs_sync: bool,
     pub config_modified: Option<std::time::SystemTime>,
-    pub resizing_size: Option<eframe::egui::Vec2>,
+    pub active_resize: Option<crate::platform::WindowResizeSession>,
     pub is_user_dragging_window: bool,
     pub last_monitor_check: std::time::Instant,
     pub uptime_history: crate::history::UptimeHistory,
@@ -152,6 +152,9 @@ pub struct AppState {
     pub autostart_enabled: bool,
     pub autostart_error: Option<String>,
     pub minimized_to_tray: bool,
+    pub update_status: crate::updater::UpdateStatus,
+    pub manual_update_check_requested: bool,
+    pub restart_for_update_requested: bool,
     pub pending_notifications: std::collections::VecDeque<TrayNotification>,
 }
 
@@ -196,7 +199,7 @@ impl AppState {
             manual_refresh_requested: false,
             scheduler_needs_sync: false,
             config_modified,
-            resizing_size: None,
+            active_resize: None,
             is_user_dragging_window: false,
             last_monitor_check: std::time::Instant::now(),
             uptime_history: crate::history::UptimeHistory::load(),
@@ -204,6 +207,9 @@ impl AppState {
             autostart_enabled: crate::platform::is_autostart_enabled(),
             autostart_error: None,
             minimized_to_tray: false,
+            update_status: crate::updater::UpdateStatus::Idle,
+            manual_update_check_requested: false,
+            restart_for_update_requested: false,
             pending_notifications: std::collections::VecDeque::new(),
         }
     }

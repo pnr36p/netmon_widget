@@ -11,8 +11,8 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
     let s = tr(state.config.language);
     let mut builder = egui::ViewportBuilder::default()
         .with_title(s.settings_title)
-        .with_inner_size([380.0, 505.0])
-        .with_min_inner_size([340.0, 440.0])
+        .with_inner_size([390.0, 615.0])
+        .with_min_inner_size([350.0, 540.0])
         .with_resizable(false)
         .with_always_on_top();
 
@@ -62,6 +62,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut lang, Language::Ru, Language::Ru.display_name());
                             ui.selectable_value(&mut lang, Language::En, Language::En.display_name());
+                            ui.selectable_value(&mut lang, Language::Hr, Language::Hr.display_name());
                         });
                     if lang != state.config.language {
                         state.config.language = lang;
@@ -163,6 +164,13 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                     );
                 }
 
+                let mut edge_snap = state.config.edge_snapping;
+                if ui.checkbox(&mut edge_snap, s.settings_edge_snapping).changed() {
+                    state.config.edge_snapping = edge_snap;
+                    crate::platform::set_edge_snapping(edge_snap);
+                    save_config(&state.config);
+                }
+
                 let mut hide_taskbar = state.config.hide_taskbar;
                 if ui.checkbox(&mut hide_taskbar, s.settings_hide_taskbar).changed() {
                     state.config.hide_taskbar = hide_taskbar;
@@ -185,6 +193,69 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                 if let Some(err) = &state.autostart_error {
                     ui.colored_label(Color32::from_rgb(0xE0, 0x45, 0x45), err);
                 }
+
+                let mut auto_upd = state.config.auto_update;
+                if ui.checkbox(&mut auto_upd, s.settings_auto_update).changed() {
+                    state.config.auto_update = auto_upd;
+                    state.scheduler_needs_sync = true;
+                    save_config(&state.config);
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} v{}",
+                        s.update_version_prefix,
+                        crate::updater::CURRENT_VERSION
+                    ));
+                    match &state.update_status {
+                        crate::updater::UpdateStatus::Idle => {
+                            if ui.button(s.update_check_now).clicked() {
+                                state.manual_update_check_requested = true;
+                            }
+                        }
+                        crate::updater::UpdateStatus::Checking => {
+                            ui.spinner();
+                            ui.label(s.update_checking);
+                        }
+                        crate::updater::UpdateStatus::Downloading(ver) => {
+                            ui.spinner();
+                            ui.label(format!("{} (v{})", s.update_downloading, ver));
+                        }
+                        crate::updater::UpdateStatus::UpToDate => {
+                            ui.colored_label(
+                                Color32::from_rgb(0x3D, 0xA8, 0x52),
+                                s.update_up_to_date,
+                            );
+                            if ui.button(s.update_check_now).clicked() {
+                                state.manual_update_check_requested = true;
+                            }
+                        }
+                        crate::updater::UpdateStatus::ReadyToRestart(ver) => {
+                            ui.colored_label(
+                                Color32::from_rgb(0x3D, 0xA8, 0x52),
+                                s.update_ready.replace("{}", ver),
+                            );
+                            if ui.button(s.update_restart_btn).clicked() {
+                                state.restart_for_update_requested = true;
+                            }
+                        }
+                        crate::updater::UpdateStatus::Error(err) => {
+                            if ui.button(s.update_check_now).clicked() {
+                                state.manual_update_check_requested = true;
+                            }
+                            let short = if err.chars().count() > 36 {
+                                let t: String = err.chars().take(35).collect();
+                                format!("{}…", t)
+                            } else {
+                                err.clone()
+                            };
+                            ui.colored_label(
+                                Color32::from_rgb(0xE0, 0x45, 0x45),
+                                format!("{}{}", s.update_err_prefix, short),
+                            );
+                        }
+                    }
+                });
 
                 ui.add_space(4.0);
                 if ui.button(s.settings_open_toml).clicked() {

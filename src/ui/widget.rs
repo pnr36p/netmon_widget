@@ -85,27 +85,55 @@ pub fn apply_minimized_visibility(ctx: &egui::Context, state: &mut AppState) {
     } else {
         let target_size = desired_widget_size(state);
         let monitors = crate::monitor::get_all_monitors();
-        let target_pos = if let (Some(saved_pos), Some(saved_id)) =
+        let snap_thresh = |scale: f32| {
+            if state.config.edge_snapping {
+                crate::monitor::SNAP_THRESHOLD * scale
+            } else {
+                0.0
+            }
+        };
+        let (target_pos, target_scale) = if let (Some(saved_pos), Some(saved_id)) =
             (state.config.window_pos, state.config.monitor_id.as_deref())
         {
             if let Some(mon) = crate::monitor::find_monitor(&monitors, saved_id) {
-                crate::monitor::snap_to_work_area(
+                let phys_size = target_size * mon.scale;
+                let p = crate::monitor::snap_to_work_area_with_threshold(
                     Pos2::new(saved_pos[0], saved_pos[1]),
-                    target_size,
+                    phys_size,
                     &mon.work_rect,
-                )
+                    snap_thresh(mon.scale),
+                    true,
+                );
+                (p, mon.scale)
             } else if let Some(fb) = crate::monitor::primary_or_first(&monitors) {
+                let phys_size = target_size * fb.scale;
                 let rel = state.config.rel_pos.unwrap_or([1.0, 0.05]);
-                crate::monitor::pos_from_rel(rel, target_size, &fb.work_rect)
+                (crate::monitor::pos_from_rel(rel, phys_size, &fb.work_rect), fb.scale)
             } else {
-                Pos2::new(saved_pos[0], saved_pos[1])
+                (Pos2::new(saved_pos[0], saved_pos[1]), 1.0)
             }
         } else if let Some(saved_pos) = state.config.window_pos {
-            Pos2::new(saved_pos[0], saved_pos[1])
+            if let Some(mon) = crate::monitor::primary_or_first(&monitors) {
+                let phys_size = target_size * mon.scale;
+                let p = crate::monitor::snap_to_work_area_with_threshold(
+                    Pos2::new(saved_pos[0], saved_pos[1]),
+                    phys_size,
+                    &mon.work_rect,
+                    snap_thresh(mon.scale),
+                    true,
+                );
+                (p, mon.scale)
+            } else {
+                (Pos2::new(saved_pos[0], saved_pos[1]), 1.0)
+            }
         } else if let Some(primary) = crate::monitor::primary_or_first(&monitors) {
-            crate::monitor::pos_from_rel([1.0, 0.05], target_size, &primary.work_rect)
+            let phys_size = target_size * primary.scale;
+            (
+                crate::monitor::pos_from_rel([1.0, 0.05], phys_size, &primary.work_rect),
+                primary.scale,
+            )
         } else {
-            Pos2::new(100.0, 100.0)
+            (Pos2::new(100.0, 100.0), 1.0)
         };
 
         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::MousePassthrough(false));
@@ -115,7 +143,14 @@ pub fn apply_minimized_visibility(ctx: &egui::Context, state: &mut AppState) {
         );
         ctx.send_viewport_cmd_to(
             egui::ViewportId::ROOT,
-            egui::ViewportCommand::OuterPosition(target_pos),
+            egui::ViewportCommand::OuterPosition(Pos2::new(
+                target_pos.x / target_scale,
+                target_pos.y / target_scale,
+            )),
+        );
+        crate::platform::set_window_pos_physical(
+            target_pos.x.round() as i32,
+            target_pos.y.round() as i32,
         );
         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
     }
@@ -225,6 +260,9 @@ pub fn handle_menu_action(
             let path = crate::config::config_path();
             let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
         }
+        NativeMenuAction::RestartToUpdate => {
+            state.restart_for_update_requested = true;
+        }
         NativeMenuAction::Close => {
             crate::config::save_config(&state.config);
             state.uptime_history.force_save();
@@ -246,9 +284,38 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let row_height = size.row_height();
     let header_height = size.header_height();
 
+    // Обработка активного перетаскивания границ окна (через Win32 SetWindowPos без джиттера)
+    if let Some(mut session) = state.active_resize.take() {
+        if ctx.input(|i| i.pointer.primary_down()) {
+            crate::platform::apply_window_resize(&mut session, state.config.edge_snapping);
+            ctx.set_cursor_icon(session.edge.cursor_icon());
+            ctx.request_repaint();
+            state.active_resize = Some(session);
+        } else if let Some(phys) = crate::platform::get_window_rect_physical() {
+            if phys.width() > 20.0 {
+                let scale = crate::platform::get_window_dpi_scale().max(0.5);
+                state.config.custom_width = Some((phys.width() / scale).clamp(110.0, 1000.0));
+                state.config.custom_height = Some((phys.height() / scale).clamp(60.0, 2000.0));
+                let monitors = crate::monitor::get_all_monitors();
+                if let Some(current_mon) = crate::monitor::best_monitor_for_rect(&monitors, &phys) {
+                    state.config.monitor_id = Some(current_mon.id.clone());
+                    state.config.window_pos = Some([phys.min.x, phys.min.y]);
+                    state.config.rel_pos = Some(crate::monitor::calculate_rel_pos(
+                        phys.min,
+                        phys.size(),
+                        &current_mon.work_rect,
+                    ));
+                    state.config.fallback_active = false;
+                    state.window_pos = Some([phys.min.x, phys.min.y]);
+                }
+                crate::config::save_config(&state.config);
+            }
+        }
+    }
+
     // Периодическая проверка мониторов (раз в секунду)
     let now = std::time::Instant::now();
-    if now.duration_since(state.last_monitor_check).as_millis() >= 1000 {
+    if state.active_resize.is_none() && now.duration_since(state.last_monitor_check).as_millis() >= 1000 {
         state.last_monitor_check = now;
         let monitors = crate::monitor::get_all_monitors();
 
@@ -256,14 +323,25 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
             // Окно на запасном экране: проверяем, не вернулся ли исходный экран
             if let (Some(saved_id), Some(saved_pos)) = (&state.config.monitor_id, state.config.window_pos) {
                 if let Some(orig_mon) = crate::monitor::find_monitor(&monitors, saved_id) {
-                    // Исходный экран вернулся! Переносим гаджет на его старое место
-                    let win_size = ctx
-                        .input(|i| i.viewport().outer_rect)
-                        .map(|r| r.size())
-                        .unwrap_or(ui.max_rect().size());
+                    // Исходный экран вернулся! Переносим гаджет на его старое место (физические пиксели)
+                    let phys_size = ui.max_rect().size() * orig_mon.scale;
                     let target_pos = Pos2::new(saved_pos[0], saved_pos[1]);
-                    let snapped = crate::monitor::snap_to_work_area(target_pos, win_size, &orig_mon.work_rect);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(snapped));
+                    let thresh = if state.config.edge_snapping {
+                        crate::monitor::SNAP_THRESHOLD * orig_mon.scale
+                    } else {
+                        0.0
+                    };
+                    let snapped = crate::monitor::snap_to_work_area_with_threshold(
+                        target_pos,
+                        phys_size,
+                        &orig_mon.work_rect,
+                        thresh,
+                        true,
+                    );
+                    crate::platform::set_window_pos_physical(
+                        snapped.x.round() as i32,
+                        snapped.y.round() as i32,
+                    );
                     state.config.fallback_active = false;
                     crate::config::save_config(&state.config);
                 }
@@ -274,13 +352,17 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 if crate::monitor::find_monitor(&monitors, current_id).is_none() {
                     // Экран отключился! Переносим на доступный экран
                     if let Some(fallback_mon) = crate::monitor::primary_or_first(&monitors) {
-                        let win_size = ctx
-                            .input(|i| i.viewport().outer_rect)
-                            .map(|r| r.size())
-                            .unwrap_or(ui.max_rect().size());
+                        let phys_size = ui.max_rect().size() * fallback_mon.scale;
                         let rel = state.config.rel_pos.unwrap_or([0.9, 0.05]);
-                        let fallback_pos = crate::monitor::pos_from_rel(rel, win_size, &fallback_mon.work_rect);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(fallback_pos));
+                        let fallback_pos = crate::monitor::pos_from_rel(
+                            rel,
+                            phys_size,
+                            &fallback_mon.work_rect,
+                        );
+                        crate::platform::set_window_pos_physical(
+                            fallback_pos.x.round() as i32,
+                            fallback_pos.y.round() as i32,
+                        );
                         state.config.fallback_active = true;
                         crate::config::save_config(&state.config);
                     }
@@ -289,27 +371,29 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         }
     }
 
-    // Обработка завершения ручного перетаскивания окна (мышь отпущена)
-    if state.is_user_dragging_window && !ctx.input(|i| i.pointer.any_down()) {
+    // Обработка завершения ручного перетаскивания окна (WM_EXITSIZEMOVE или отпускание мыши)
+    let size_move_done = crate::platform::take_size_move_finished();
+    if (size_move_done || (state.is_user_dragging_window && !ctx.input(|i| i.pointer.any_down())))
+        && state.active_resize.is_none()
+    {
         state.is_user_dragging_window = false;
 
-        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-            let size = outer.size();
-            let monitors = crate::monitor::get_all_monitors();
-            if let Some(current_mon) = crate::monitor::best_monitor_for_rect(&monitors, &outer) {
-                // Прижатие к краю (Edge Snapping)
-                let snapped = crate::monitor::snap_to_work_area(outer.min, size, &current_mon.work_rect);
-                if snapped != outer.min {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(snapped));
+        if let Some(phys) = crate::platform::get_window_rect_physical() {
+            if phys.width() > 20.0 {
+                let monitors = crate::monitor::get_all_monitors();
+                if let Some(current_mon) = crate::monitor::best_monitor_for_rect(&monitors, &phys) {
+                    // WM_MOVING уже аккуратно прилепил окно, если edge_snapping включён — просто фиксируем точные координаты
+                    state.config.monitor_id = Some(current_mon.id.clone());
+                    state.config.window_pos = Some([phys.min.x, phys.min.y]);
+                    state.config.rel_pos = Some(crate::monitor::calculate_rel_pos(
+                        phys.min,
+                        phys.size(),
+                        &current_mon.work_rect,
+                    ));
+                    state.config.fallback_active = false;
+                    state.window_pos = Some([phys.min.x, phys.min.y]);
+                    crate::config::save_config(&state.config);
                 }
-
-                // Пользователь сам поставил окно сюда: запоминаем монитор, координаты и сбрасываем fallback
-                state.config.monitor_id = Some(current_mon.id.clone());
-                state.config.window_pos = Some([snapped.x, snapped.y]);
-                state.config.rel_pos = Some(crate::monitor::calculate_rel_pos(snapped, size, &current_mon.work_rect));
-                state.config.fallback_active = false;
-                state.window_pos = Some([snapped.x, snapped.y]);
-                crate::config::save_config(&state.config);
             }
         }
     }
@@ -334,85 +418,28 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         Color32::from_rgba_unmultiplied(pal.border.r(), pal.border.g(), pal.border.b(), bg_alpha);
     draw_inside_border(ui.painter(), rect, border_color);
 
-    // 3. Обработка правого клика выполняется после отрисовки строк, чтобы определить конкретный узел/группу.
+    // Рисуем аккуратную насечку для ресайза в правом нижнем углу
+    draw_resize_grip(ui.painter(), rect.right_bottom(), pal.grip);
 
-    // 4. Интерактивные границы для свободного изменения размера окна мышкой (Resize handles)
-    let right_edge = Rect::from_min_max(
-        Pos2::new(rect.right() - 8.0, rect.top()),
-        Pos2::new(rect.right(), rect.bottom() - 14.0),
+    // Внутренняя область (без внешних 6px границ ресайза), чтобы клики/drag элементов не конфликтовали с краями
+    let safe_interior = Rect::from_min_max(
+        Pos2::new(rect.left() + 6.0, rect.top() + 5.0),
+        Pos2::new(rect.right() - 6.0, rect.bottom() - 6.0),
     );
-    let bottom_edge = Rect::from_min_max(
-        Pos2::new(rect.left(), rect.bottom() - 8.0),
-        Pos2::new(rect.right() - 14.0, rect.bottom()),
-    );
-    let corner = Rect::from_min_max(
+    let br_grip_zone = Rect::from_min_max(
         Pos2::new(rect.right() - 14.0, rect.bottom() - 14.0),
         rect.max,
     );
-
-    let corner_resp = ui.interact(corner, ui.scope_id().with("res_corner"), Sense::click_and_drag());
-    if corner_resp.hovered() || corner_resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeSouthEast);
-    }
-
-    let right_resp = ui.interact(right_edge, ui.scope_id().with("res_right"), Sense::click_and_drag());
-    if right_resp.hovered() || right_resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeEast);
-    }
-
-    let bottom_resp = ui.interact(bottom_edge, ui.scope_id().with("res_bottom"), Sense::click_and_drag());
-    if bottom_resp.hovered() || bottom_resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeSouth);
-    }
-
-    // Плавное изменение размера окна с сохранением в конфиг
-    if corner_resp.drag_started() || right_resp.drag_started() || bottom_resp.drag_started() {
-        state.resizing_size = Some(rect.size());
-    }
-
-    if corner_resp.dragged() {
-        if let Some(ref mut sz) = state.resizing_size {
-            let delta = corner_resp.drag_delta();
-            sz.x = (sz.x + delta.x).clamp(110.0, 1000.0);
-            sz.y = (sz.y + delta.y).clamp(60.0, 2000.0);
-            state.config.custom_width = Some(sz.x);
-            state.config.custom_height = Some(sz.y);
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(*sz));
-        }
-    } else if right_resp.dragged() {
-        if let Some(ref mut sz) = state.resizing_size {
-            let delta = right_resp.drag_delta();
-            sz.x = (sz.x + delta.x).clamp(110.0, 1000.0);
-            state.config.custom_width = Some(sz.x);
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(*sz));
-        }
-    } else if bottom_resp.dragged() {
-        if let Some(ref mut sz) = state.resizing_size {
-            let delta = bottom_resp.drag_delta();
-            sz.y = (sz.y + delta.y).clamp(60.0, 2000.0);
-            state.config.custom_height = Some(sz.y);
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(*sz));
-        }
-    }
-
-    if corner_resp.drag_stopped() || right_resp.drag_stopped() || bottom_resp.drag_stopped() {
-        state.resizing_size = None;
-        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-            let monitors = crate::monitor::get_all_monitors();
-            if let Some(current_mon) = crate::monitor::best_monitor_for_rect(&monitors, &outer) {
-                let snapped = crate::monitor::snap_to_work_area(outer.min, outer.size(), &current_mon.work_rect);
-                if snapped != outer.min {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(snapped));
-                }
-                state.config.window_pos = Some([snapped.x, snapped.y]);
-                state.config.rel_pos = Some(crate::monitor::calculate_rel_pos(snapped, outer.size(), &current_mon.work_rect));
-            }
-        }
-        crate::config::save_config(&state.config);
-    }
-
-    // Рисуем аккуратную насечку для ресайза в правом нижнем углу
-    draw_resize_grip(ui.painter(), rect.right_bottom(), pal.grip);
+    let press_in_interior = ctx.input(|i| {
+        i.pointer
+            .press_origin()
+            .is_none_or(|p| safe_interior.contains(p) && !br_grip_zone.contains(p))
+    });
+    let hover_in_interior = ctx.input(|i| {
+        i.pointer
+            .hover_pos()
+            .is_none_or(|p| safe_interior.contains(p) && !br_grip_zone.contains(p))
+    });
 
     let mut current_y = rect.top() + 1.0;
 
@@ -424,16 +451,17 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     );
 
     // Кнопка обновления слева: вращающаяся/статичная круговая стрелочка
-    let refresh_center = Pos2::new(bar_rect.left() + 12.0, bar_rect.center().y);
-    let refresh_rect = Rect::from_center_size(refresh_center, Vec2::splat(16.0));
+    let btn_y = (bar_rect.top() + 11.5).max(rect.top() + 12.5);
+    let refresh_center = Pos2::new(bar_rect.left() + 13.0, btn_y);
+    let refresh_rect = Rect::from_center_size(refresh_center, Vec2::new(15.0, 14.0));
     let refresh_resp = ui.interact(refresh_rect, ui.scope_id().with("gadget_refresh_btn"), Sense::click());
     if refresh_resp.clicked() {
         state.manual_refresh_requested = true;
     }
 
     // Кнопки управления окном справа: Свернуть (—) и Закрыть (×)
-    let close_center = Pos2::new(bar_rect.right() - 11.0, bar_rect.center().y);
-    let close_rect = Rect::from_center_size(close_center, Vec2::splat(15.0));
+    let close_center = Pos2::new(bar_rect.right() - 12.0, btn_y);
+    let close_rect = Rect::from_center_size(close_center, Vec2::new(14.0, 14.0));
     let close_resp = ui.interact(close_rect, ui.scope_id().with("gadget_close_btn"), Sense::click());
     if close_resp.clicked() {
         crate::config::save_config(&state.config);
@@ -441,21 +469,21 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    let min_center = Pos2::new(bar_rect.right() - 27.0, bar_rect.center().y);
-    let min_rect = Rect::from_center_size(min_center, Vec2::splat(15.0));
+    let min_center = Pos2::new(bar_rect.right() - 27.0, btn_y);
+    let min_rect = Rect::from_center_size(min_center, Vec2::new(14.0, 14.0));
     let min_resp = ui.interact(min_rect, ui.scope_id().with("gadget_minimize_btn"), Sense::click());
     if min_resp.clicked() {
         state.minimized_to_tray = true;
         apply_minimized_visibility(&ctx, state);
     }
 
-    // Перетаскивание окна за свободную область шапки между кнопками (только ЛКМ)
+    // Перетаскивание окна за свободную область шапки между кнопками (ниже верхних 5px для ресайза)
     let drag_rect = Rect::from_min_max(
-        Pos2::new(refresh_rect.right() + 1.0, bar_rect.top()),
+        Pos2::new(refresh_rect.right() + 1.0, rect.top() + 5.0),
         Pos2::new((min_rect.left() - 1.0).max(refresh_rect.right() + 2.0), bar_rect.bottom()),
     );
     let bar_resp = ui.interact(drag_rect, ui.scope_id().with("gadget_top_drag"), Sense::click_and_drag());
-    if bar_resp.drag_started_by(egui::PointerButton::Primary) {
+    if bar_resp.drag_started_by(egui::PointerButton::Primary) && state.active_resize.is_none() {
         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         state.is_user_dragging_window = true;
     }
@@ -558,12 +586,21 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     Vec2::new(ui.available_width(), header_height),
                     Sense::click_and_drag(),
                 );
-                if header_resp.drag_started() && primary_down && state.drag_state.is_none() {
+                if header_resp.drag_started()
+                    && primary_down
+                    && state.drag_state.is_none()
+                    && state.active_resize.is_none()
+                    && press_in_interior
+                {
                     state.drag_state = Some(DragPayload::Section { sec_idx });
                 }
 
                 let is_dragged_sec = state.drag_state == Some(DragPayload::Section { sec_idx });
-                if header_resp.hovered() && state.drag_state.is_none() {
+                if header_resp.hovered()
+                    && state.drag_state.is_none()
+                    && state.active_resize.is_none()
+                    && hover_in_interior
+                {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                 }
 
@@ -607,9 +644,14 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     sec_full_rect = sec_full_rect.union(row_rect);
                     drag_slots.push(DragSlot::Check(sec_idx, chk_idx, row_rect));
 
-                    if row_resp.double_clicked() {
+                    if row_resp.double_clicked() && press_in_interior {
                         pending_edit = Some(EditHostState::from_check(sec_idx, chk_idx, check));
-                    } else if row_resp.drag_started() && primary_down && state.drag_state.is_none() {
+                    } else if row_resp.drag_started()
+                        && primary_down
+                        && state.drag_state.is_none()
+                        && state.active_resize.is_none()
+                        && press_in_interior
+                    {
                         state.drag_state = Some(DragPayload::Check { sec_idx, chk_idx });
                     }
 
@@ -624,7 +666,11 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             Stroke::new(1.0, pal.title_blue),
                             egui::StrokeKind::Inside,
                         );
-                    } else if row_resp.hovered() && state.drag_state.is_none() {
+                    } else if row_resp.hovered()
+                        && state.drag_state.is_none()
+                        && state.active_resize.is_none()
+                        && hover_in_interior
+                    {
                         ui.painter().rect_filled(row_rect, 0.0, pal.row_hover);
                         hovered_tooltip = Some((check.clone(), row_rect));
                     }
@@ -737,6 +783,93 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         crate::ui::tooltip::hide();
     }
 
+    // Интерактивные зоны изменения размера по ВСЕМ 4 сторонам и 4 углам (поверх контента)
+    {
+        use crate::platform::ResizeEdge;
+        let edge = 6.0;
+        let top_h = 5.0;
+        let top_corner = 8.0;
+        let corner = 10.0;
+        let br = 14.0;
+        let handles = [
+            (
+                ResizeEdge::TopLeft,
+                Rect::from_min_max(rect.min, Pos2::new(rect.left() + top_corner, rect.top() + top_corner)),
+                "res_tl",
+            ),
+            (
+                ResizeEdge::TopRight,
+                Rect::from_min_max(
+                    Pos2::new(rect.right() - top_corner, rect.top()),
+                    Pos2::new(rect.right(), rect.top() + top_corner),
+                ),
+                "res_tr",
+            ),
+            (
+                ResizeEdge::BottomLeft,
+                Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.bottom() - corner),
+                    Pos2::new(rect.left() + corner, rect.bottom()),
+                ),
+                "res_bl",
+            ),
+            (
+                ResizeEdge::BottomRight,
+                Rect::from_min_max(Pos2::new(rect.right() - br, rect.bottom() - br), rect.max),
+                "res_br",
+            ),
+            (
+                ResizeEdge::Left,
+                Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.top() + top_corner),
+                    Pos2::new(rect.left() + edge, rect.bottom() - corner),
+                ),
+                "res_l",
+            ),
+            (
+                ResizeEdge::Right,
+                Rect::from_min_max(
+                    Pos2::new(rect.right() - edge, rect.top() + top_corner),
+                    Pos2::new(rect.right(), rect.bottom() - corner),
+                ),
+                "res_r",
+            ),
+            (
+                ResizeEdge::Top,
+                Rect::from_min_max(
+                    Pos2::new(rect.left() + top_corner, rect.top()),
+                    Pos2::new(rect.right() - top_corner, rect.top() + top_h),
+                ),
+                "res_t",
+            ),
+            (
+                ResizeEdge::Bottom,
+                Rect::from_min_max(
+                    Pos2::new(rect.left() + corner, rect.bottom() - edge),
+                    Pos2::new(rect.right() - br, rect.bottom()),
+                ),
+                "res_b",
+            ),
+        ];
+
+        for (edge_kind, hrect, salt) in handles {
+            let resp = ui.interact(hrect, ui.scope_id().with(salt), Sense::click_and_drag());
+            if state.drag_state.is_none() && (resp.hovered() || resp.dragged()) {
+                ctx.set_cursor_icon(edge_kind.cursor_icon());
+            }
+            if state.active_resize.is_none()
+                && state.drag_state.is_none()
+                && resp.drag_started_by(egui::PointerButton::Primary)
+            {
+                if let Some(session) = crate::platform::begin_window_resize(edge_kind) {
+                    state.active_resize = Some(session);
+                    ctx.set_cursor_icon(edge_kind.cursor_icon());
+                    ctx.request_repaint();
+                }
+            }
+        }
+    }
+
     // Нативное Win32 контекстное меню по правому клику (с определением строки / группы под курсором)
     let secondary_clicked = ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
     if secondary_clicked {
@@ -755,6 +888,10 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                         _ => None,
                     });
 
+                    let update_ready = matches!(
+                        state.update_status,
+                        crate::updater::UpdateStatus::ReadyToRestart(_)
+                    );
                     let action = if let Some((si, ci)) = hit_check {
                         let name = state.sections[si].checks[ci].config.name.clone();
                         let sec_name = state.sections[si].name.clone();
@@ -764,6 +901,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             state.config.always_on_top,
                             state.minimized_to_tray,
                             state.config.hide_taskbar,
+                            update_ready,
                             state.config.interval_sec,
                             crate::ui::menu::native::MenuTarget::Check {
                                 sec_idx: si,
@@ -780,6 +918,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             state.config.always_on_top,
                             state.minimized_to_tray,
                             state.config.hide_taskbar,
+                            update_ready,
                             state.config.interval_sec,
                             crate::ui::menu::native::MenuTarget::Section {
                                 sec_idx: si,
@@ -793,6 +932,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             state.config.always_on_top,
                             state.minimized_to_tray,
                             state.config.hide_taskbar,
+                            update_ready,
                             state.config.interval_sec,
                             crate::ui::menu::native::MenuTarget::EmptyArea,
                         )
@@ -808,7 +948,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Плавающая подсказка за пределами окна гаджета
     let can_show_tooltip = !state.is_user_dragging_window
-        && state.resizing_size.is_none()
+        && state.active_resize.is_none()
         && state.drag_state.is_none()
         && state.editing_check.is_none()
         && state.editing_group.is_none()

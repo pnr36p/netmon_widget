@@ -8,10 +8,12 @@ fn kind_label(kind: &str, lang: Language) -> &'static str {
         ("ping", _) => "ping (ICMP)",
         ("tcp", Language::Ru) => "tcp (TCP-порт)",
         ("tcp", Language::En) => "tcp (TCP port)",
+        ("tcp", Language::Hr) => "tcp (TCP port)",
         ("https", _) => "https (HTTPS GET)",
         ("http", _) => "http (HTTP GET)",
         ("dns", Language::Ru) => "dns (DNS-запрос)",
         ("dns", Language::En) => "dns (DNS query)",
+        ("dns", Language::Hr) => "dns (DNS upit)",
         _ => "ping (ICMP)",
     }
 }

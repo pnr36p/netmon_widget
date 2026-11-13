@@ -198,6 +198,24 @@ mod win {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetCurrentProcessId() -> u32;
+        fn GetModuleHandleA(lp_module_name: *const i8) -> *mut std::ffi::c_void;
+        fn GetProcAddress(h_module: *mut std::ffi::c_void, lp_proc_name: *const i8) -> *const std::ffi::c_void;
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct POINT {
+        x: i32,
+        y: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RECT {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
     }
 
     #[link(name = "user32")]
@@ -207,9 +225,57 @@ mod win {
             l_param: isize,
         ) -> i32;
         fn GetWindowThreadProcessId(hwnd: isize, lpdw_process_id: *mut u32) -> u32;
+        fn IsWindow(hwnd: isize) -> i32;
         fn IsWindowVisible(hwnd: isize) -> i32;
         fn GetWindowTextW(hwnd: isize, lp_string: *mut u16, n_max_count: i32) -> i32;
+        fn GetWindowRect(hwnd: isize, lp_rect: *mut RECT) -> i32;
+        fn SetWindowPos(
+            hwnd: *mut std::ffi::c_void,
+            hwnd_insert_after: *mut std::ffi::c_void,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            u_flags: u32,
+        ) -> i32;
+        fn GetCursorPos(lp_point: *mut POINT) -> i32;
+        fn MonitorFromRect(lprc: *const RECT, dw_flags: u32) -> *mut std::ffi::c_void;
+        fn GetMonitorInfoW(
+            hmonitor: *mut std::ffi::c_void,
+            lpmi: *mut crate::monitor::MONITORINFOEXW,
+        ) -> i32;
+        fn SetWindowLongPtrW(hwnd: isize, n_index: i32, dw_new_long: isize) -> isize;
+        fn CallWindowProcW(
+            lp_prev_wnd_func: isize,
+            hwnd: isize,
+            msg: u32,
+            w_param: usize,
+            l_param: isize,
+        ) -> isize;
     }
+
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+
+    static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+    static ORIG_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+    static EDGE_SNAPPING_ENABLED: AtomicBool = AtomicBool::new(true);
+    static SIZEMOVE_FINISHED: AtomicBool = AtomicBool::new(false);
+    static DRAG_ANCHOR_VALID: AtomicBool = AtomicBool::new(false);
+    static DRAG_CURSOR_X: AtomicI32 = AtomicI32::new(0);
+    static DRAG_CURSOR_Y: AtomicI32 = AtomicI32::new(0);
+    static DRAG_RECT_LEFT: AtomicI32 = AtomicI32::new(0);
+    static DRAG_RECT_TOP: AtomicI32 = AtomicI32::new(0);
+    static DRAG_RECT_W: AtomicI32 = AtomicI32::new(1);
+    static DRAG_RECT_H: AtomicI32 = AtomicI32::new(1);
+
+    const WM_MOVING: u32 = 0x0216;
+    const WM_ENTERSIZEMOVE: u32 = 0x0231;
+    const WM_EXITSIZEMOVE: u32 = 0x0232;
+    const GWLP_WNDPROC: i32 = -4;
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
 
     unsafe extern "system" fn find_main_hwnd_proc(hwnd: isize, lparam: isize) -> i32 {
         unsafe {
@@ -288,6 +354,401 @@ mod win {
             }
         }
     }
+
+    fn find_main_hwnd() -> isize {
+        let cached = MAIN_HWND.load(Ordering::Relaxed);
+        if cached != 0 && unsafe { IsWindow(cached) != 0 } {
+            return cached;
+        }
+        let mut hwnd: isize = 0;
+        unsafe {
+            EnumWindows(find_main_hwnd_proc, (&mut hwnd as *mut isize) as isize);
+        }
+        if hwnd != 0 {
+            MAIN_HWND.store(hwnd, Ordering::Relaxed);
+        }
+        hwnd
+    }
+
+    fn window_dpi_scale(hwnd: isize) -> f32 {
+        type GetDpiForWindowFn = unsafe extern "system" fn(isize) -> u32;
+        unsafe {
+            let hmod = GetModuleHandleA(b"user32.dll\0".as_ptr() as *const i8);
+            if !hmod.is_null() {
+                let proc = GetProcAddress(hmod, b"GetDpiForWindow\0".as_ptr() as *const i8);
+                if !proc.is_null() {
+                    let func: GetDpiForWindowFn = std::mem::transmute(proc);
+                    let dpi = func(hwnd);
+                    if dpi >= 48 {
+                        return (dpi as f32 / 96.0).clamp(0.75, 4.0);
+                    }
+                }
+            }
+        }
+        1.0
+    }
+
+    unsafe fn work_rect_for_rect(r: &RECT) -> Option<RECT> {
+        let hmon = MonitorFromRect(r, MONITOR_DEFAULTTONEAREST);
+        if hmon.is_null() {
+            return None;
+        }
+        let mut mi: crate::monitor::MONITORINFOEXW = std::mem::zeroed();
+        mi.cb_size = std::mem::size_of::<crate::monitor::MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(hmon, &mut mi) != 0 {
+            Some(RECT {
+                left: mi.rc_work.left,
+                top: mi.rc_work.top,
+                right: mi.rc_work.right,
+                bottom: mi.rc_work.bottom,
+            })
+        } else {
+            None
+        }
+    }
+
+    unsafe extern "system" fn subclass_wndproc(
+        hwnd: isize,
+        msg: u32,
+        w_param: usize,
+        l_param: isize,
+    ) -> isize {
+        if msg == WM_ENTERSIZEMOVE {
+            unsafe {
+                let mut pt: POINT = std::mem::zeroed();
+                let mut wr: RECT = std::mem::zeroed();
+                if GetCursorPos(&mut pt) != 0 && GetWindowRect(hwnd, &mut wr) != 0 {
+                    DRAG_CURSOR_X.store(pt.x, Ordering::Relaxed);
+                    DRAG_CURSOR_Y.store(pt.y, Ordering::Relaxed);
+                    DRAG_RECT_LEFT.store(wr.left, Ordering::Relaxed);
+                    DRAG_RECT_TOP.store(wr.top, Ordering::Relaxed);
+                    DRAG_RECT_W.store((wr.right - wr.left).max(1), Ordering::Relaxed);
+                    DRAG_RECT_H.store((wr.bottom - wr.top).max(1), Ordering::Relaxed);
+                    DRAG_ANCHOR_VALID.store(true, Ordering::Relaxed);
+                }
+            }
+        } else if msg == WM_MOVING && l_param != 0 && EDGE_SNAPPING_ENABLED.load(Ordering::Relaxed)
+        {
+            unsafe {
+                let r = &mut *(l_param as *mut RECT);
+                let w = r.right - r.left;
+                let h = r.bottom - r.top;
+                // Не прижимаем служебное свёрнутое окно (1x1 за экраном)
+                if w > 10 && h > 10 {
+                    let mut pt: POINT = std::mem::zeroed();
+                    if GetCursorPos(&mut pt) != 0 {
+                        if !DRAG_ANCHOR_VALID.load(Ordering::Relaxed) {
+                            DRAG_CURSOR_X.store(pt.x, Ordering::Relaxed);
+                            DRAG_CURSOR_Y.store(pt.y, Ordering::Relaxed);
+                            DRAG_RECT_LEFT.store(r.left, Ordering::Relaxed);
+                            DRAG_RECT_TOP.store(r.top, Ordering::Relaxed);
+                            DRAG_RECT_W.store(w.max(1), Ordering::Relaxed);
+                            DRAG_RECT_H.store(h.max(1), Ordering::Relaxed);
+                            DRAG_ANCHOR_VALID.store(true, Ordering::Relaxed);
+                        }
+
+                        // Считаем «истинную» позицию от стартовой точки курсора, чтобы медленное отлипание
+                        // не терялось из-за инкрементальной логики SC_MOVE
+                        let start_cx = DRAG_CURSOR_X.load(Ordering::Relaxed);
+                        let start_cy = DRAG_CURSOR_Y.load(Ordering::Relaxed);
+                        let start_l = DRAG_RECT_LEFT.load(Ordering::Relaxed);
+                        let start_t = DRAG_RECT_TOP.load(Ordering::Relaxed);
+                        let start_w = DRAG_RECT_W.load(Ordering::Relaxed).max(1);
+                        let start_h = DRAG_RECT_H.load(Ordering::Relaxed).max(1);
+
+                        let grab_x = start_cx - start_l;
+                        let grab_y = start_cy - start_t;
+                        let adj_grab_x = ((grab_x as f32) * (w as f32) / (start_w as f32)).round() as i32;
+                        let adj_grab_y = ((grab_y as f32) * (h as f32) / (start_h as f32)).round() as i32;
+
+                        let true_left = pt.x - adj_grab_x;
+                        let true_top = pt.y - adj_grab_y;
+                        let true_rect = RECT {
+                            left: true_left,
+                            top: true_top,
+                            right: true_left + w,
+                            bottom: true_top + h,
+                        };
+
+                        let mut out_left = true_left;
+                        let mut out_top = true_top;
+                        if let Some(work) = work_rect_for_rect(&true_rect) {
+                            let scale = window_dpi_scale(hwnd);
+                            let snap_px = (crate::monitor::SNAP_THRESHOLD * scale)
+                                .round()
+                                .clamp(5.0, 12.0) as i32;
+
+                            let dl = (true_left - work.left).abs();
+                            let dr = (work.right - (true_left + w)).abs();
+                            if dl <= dr && dl <= snap_px {
+                                out_left = work.left;
+                            } else if dr <= snap_px {
+                                out_left = work.right - w;
+                            }
+
+                            let dt = (true_top - work.top).abs();
+                            let db = (work.bottom - (true_top + h)).abs();
+                            if dt <= db && dt <= snap_px {
+                                out_top = work.top;
+                            } else if db <= snap_px {
+                                out_top = work.bottom - h;
+                            }
+                        }
+
+                        r.left = out_left;
+                        r.top = out_top;
+                        r.right = out_left + w;
+                        r.bottom = out_top + h;
+                    }
+                }
+            }
+        } else if msg == WM_EXITSIZEMOVE {
+            DRAG_ANCHOR_VALID.store(false, Ordering::Relaxed);
+            SIZEMOVE_FINISHED.store(true, Ordering::Release);
+        }
+
+        let orig = ORIG_WNDPROC.load(Ordering::Relaxed);
+        if orig != 0 {
+            unsafe { CallWindowProcW(orig, hwnd, msg, w_param, l_param) }
+        } else {
+            0
+        }
+    }
+
+    pub fn ensure_window_hook() {
+        let hwnd = find_main_hwnd();
+        if hwnd == 0 || ORIG_WNDPROC.load(Ordering::Relaxed) != 0 {
+            return;
+        }
+        unsafe {
+            let prev = SetWindowLongPtrW(
+                hwnd,
+                GWLP_WNDPROC,
+                subclass_wndproc as *const () as isize,
+            );
+            if prev != 0 {
+                ORIG_WNDPROC.store(prev, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn set_edge_snapping(enabled: bool) {
+        EDGE_SNAPPING_ENABLED.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn take_size_move_finished() -> bool {
+        SIZEMOVE_FINISHED.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn get_window_rect_physical() -> Option<eframe::egui::Rect> {
+        let hwnd = find_main_hwnd();
+        if hwnd == 0 {
+            return None;
+        }
+        unsafe {
+            let mut r: RECT = std::mem::zeroed();
+            if GetWindowRect(hwnd, &mut r) != 0 {
+                Some(eframe::egui::Rect::from_min_max(
+                    eframe::egui::Pos2::new(r.left as f32, r.top as f32),
+                    eframe::egui::Pos2::new(r.right as f32, r.bottom as f32),
+                ))
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn set_window_pos_physical(x: i32, y: i32) {
+        let hwnd = find_main_hwnd();
+        if hwnd == 0 {
+            return;
+        }
+        unsafe {
+            SetWindowPos(
+                hwnd as *mut std::ffi::c_void,
+                std::ptr::null_mut(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    pub fn get_window_dpi_scale() -> f32 {
+        let hwnd = find_main_hwnd();
+        if hwnd == 0 {
+            1.0
+        } else {
+            window_dpi_scale(hwnd)
+        }
+    }
+
+    pub fn begin_window_resize(edge: super::ResizeEdge) -> Option<super::WindowResizeSession> {
+        let hwnd = find_main_hwnd();
+        if hwnd == 0 {
+            return None;
+        }
+        unsafe {
+            let mut pt: POINT = std::mem::zeroed();
+            let mut r: RECT = std::mem::zeroed();
+            if GetCursorPos(&mut pt) == 0 || GetWindowRect(hwnd, &mut r) == 0 {
+                return None;
+            }
+            let rect_arr = [r.left, r.top, r.right, r.bottom];
+            Some(super::WindowResizeSession {
+                edge,
+                start_cursor: [pt.x, pt.y],
+                start_rect: rect_arr,
+                scale: window_dpi_scale(hwnd),
+                last_rect: rect_arr,
+            })
+        }
+    }
+
+    pub fn apply_window_resize(session: &mut super::WindowResizeSession, snap_enabled: bool) {
+        use super::ResizeEdge;
+        let hwnd = find_main_hwnd();
+        if hwnd == 0 {
+            return;
+        }
+        unsafe {
+            let mut pt: POINT = std::mem::zeroed();
+            if GetCursorPos(&mut pt) == 0 {
+                return;
+            }
+            let dx = pt.x - session.start_cursor[0];
+            let dy = pt.y - session.start_cursor[1];
+
+            let min_w = (110.0 * session.scale).round() as i32;
+            let max_w = (1000.0 * session.scale).round() as i32;
+            let min_h = (60.0 * session.scale).round() as i32;
+            let max_h = (2000.0 * session.scale).round() as i32;
+
+            let [sl, st, sr, sb] = session.start_rect;
+            let mut l = sl;
+            let mut t = st;
+            let mut r = sr;
+            let mut b = sb;
+
+            let moves_left = matches!(
+                session.edge,
+                ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft
+            );
+            let moves_right = matches!(
+                session.edge,
+                ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight
+            );
+            let moves_top = matches!(
+                session.edge,
+                ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight
+            );
+            let moves_bottom = matches!(
+                session.edge,
+                ResizeEdge::Bottom | ResizeEdge::BottomLeft | ResizeEdge::BottomRight
+            );
+
+            if moves_left {
+                l = (sl + dx).clamp(sr - max_w, sr - min_w);
+            }
+            if moves_right {
+                r = (sr + dx).clamp(sl + min_w, sl + max_w);
+            }
+            if moves_top {
+                t = (st + dy).clamp(sb - max_h, sb - min_h);
+            }
+            if moves_bottom {
+                b = (sb + dy).clamp(st + min_h, st + max_h);
+            }
+
+            if snap_enabled {
+                let probe = RECT {
+                    left: l,
+                    top: t,
+                    right: r,
+                    bottom: b,
+                };
+                if let Some(work) = work_rect_for_rect(&probe) {
+                    let snap_px = (crate::monitor::SNAP_THRESHOLD * session.scale).round() as i32;
+                    if moves_left && (l - work.left).abs() <= snap_px {
+                        let cand_w = r - work.left;
+                        if cand_w >= min_w && cand_w <= max_w {
+                            l = work.left;
+                        }
+                    }
+                    if moves_right && (work.right - r).abs() <= snap_px {
+                        let cand_w = work.right - l;
+                        if cand_w >= min_w && cand_w <= max_w {
+                            r = work.right;
+                        }
+                    }
+                    if moves_top && (t - work.top).abs() <= snap_px {
+                        let cand_h = b - work.top;
+                        if cand_h >= min_h && cand_h <= max_h {
+                            t = work.top;
+                        }
+                    }
+                    if moves_bottom && (work.bottom - b).abs() <= snap_px {
+                        let cand_h = work.bottom - t;
+                        if cand_h >= min_h && cand_h <= max_h {
+                            b = work.bottom;
+                        }
+                    }
+                }
+            }
+
+            let next = [l, t, r, b];
+            if next != session.last_rect {
+                session.last_rect = next;
+                SetWindowPos(
+                    hwnd as *mut std::ffi::c_void,
+                    std::ptr::null_mut(),
+                    l,
+                    t,
+                    r - l,
+                    b - t,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ResizeEdge {
+    pub fn cursor_icon(self) -> eframe::egui::CursorIcon {
+        match self {
+            ResizeEdge::Left | ResizeEdge::Right => eframe::egui::CursorIcon::ResizeHorizontal,
+            ResizeEdge::Top | ResizeEdge::Bottom => eframe::egui::CursorIcon::ResizeVertical,
+            ResizeEdge::TopLeft | ResizeEdge::BottomRight => {
+                eframe::egui::CursorIcon::ResizeNwSe
+            }
+            ResizeEdge::TopRight | ResizeEdge::BottomLeft => {
+                eframe::egui::CursorIcon::ResizeNeSw
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WindowResizeSession {
+    pub edge: ResizeEdge,
+    pub start_cursor: [i32; 2],
+    pub start_rect: [i32; 4],
+    pub scale: f32,
+    pub last_rect: [i32; 4],
 }
 
 pub fn current_exe_path() -> PathBuf {
@@ -337,6 +798,77 @@ pub fn set_skip_taskbar(skip: bool) {
     {
         let _ = skip;
     }
+}
+
+pub fn ensure_window_hook() {
+    #[cfg(target_os = "windows")]
+    win::ensure_window_hook();
+}
+
+pub fn set_edge_snapping(enabled: bool) {
+    #[cfg(target_os = "windows")]
+    win::set_edge_snapping(enabled);
+    #[cfg(not(target_os = "windows"))]
+    let _ = enabled;
+}
+
+pub fn take_size_move_finished() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        win::take_size_move_finished()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+pub fn get_window_rect_physical() -> Option<eframe::egui::Rect> {
+    #[cfg(target_os = "windows")]
+    {
+        win::get_window_rect_physical()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+pub fn set_window_pos_physical(x: i32, y: i32) {
+    #[cfg(target_os = "windows")]
+    win::set_window_pos_physical(x, y);
+    #[cfg(not(target_os = "windows"))]
+    let _ = (x, y);
+}
+
+pub fn get_window_dpi_scale() -> f32 {
+    #[cfg(target_os = "windows")]
+    {
+        win::get_window_dpi_scale()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        1.0
+    }
+}
+
+pub fn begin_window_resize(edge: ResizeEdge) -> Option<WindowResizeSession> {
+    #[cfg(target_os = "windows")]
+    {
+        win::begin_window_resize(edge)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = edge;
+        None
+    }
+}
+
+pub fn apply_window_resize(session: &mut WindowResizeSession, snap_enabled: bool) {
+    #[cfg(target_os = "windows")]
+    win::apply_window_resize(session, snap_enabled);
+    #[cfg(not(target_os = "windows"))]
+    let _ = (session, snap_enabled);
 }
 
 #[cfg(test)]

@@ -117,6 +117,7 @@ pub mod native {
     const LOGPIXELSY: i32 = 90;
     const CLEARTYPE_QUALITY: DWORD = 5;
     const FW_NORMAL: i32 = 400;
+    const PS_NULL: i32 = 5;
 
     #[link(name = "user32")]
     extern "system" {
@@ -188,6 +189,9 @@ pub mod native {
         fn SetBkMode(hdc: HDC, mode: i32) -> i32;
         fn SetTextColor(hdc: HDC, color: u32) -> u32;
         fn GetDeviceCaps(hdc: HDC, index: i32) -> i32;
+        fn CreatePen(style: i32, width: i32, color: u32) -> HGDIOBJ;
+        fn Polygon(hdc: HDC, apt: *const POINT, cpt: i32) -> BOOL;
+        fn ExcludeClipRect(hdc: HDC, left: i32, top: i32, right: i32, bottom: i32) -> i32;
     }
 
     fn rgb(r: u8, g: u8, b: u8) -> u32 {
@@ -386,6 +390,48 @@ pub mod native {
 
                 SelectObject(dis.hdc, old);
                 DeleteObject(font as HGDIOBJ);
+
+                if entry.has_submenu {
+                    let arrow_col = if is_dark {
+                        rgb(0xC8, 0xD2, 0xDE)
+                    } else {
+                        rgb(0x3A, 0x42, 0x4E)
+                    };
+                    let mid_y = (dis.rc_item.top + dis.rc_item.bottom) / 2;
+                    let tip_x = dis.rc_item.right - (8.0 * scale).round() as i32;
+                    let base_x = dis.rc_item.right - (12.0 * scale).round() as i32;
+                    let half_h = (4.0 * scale).round().max(3.0) as i32;
+                    let pts = [
+                        POINT {
+                            x: base_x,
+                            y: mid_y - half_h,
+                        },
+                        POINT { x: tip_x, y: mid_y },
+                        POINT {
+                            x: base_x,
+                            y: mid_y + half_h,
+                        },
+                    ];
+                    let brush = CreateSolidBrush(arrow_col);
+                    let pen = CreatePen(PS_NULL, 0, 0);
+                    let old_br = SelectObject(dis.hdc, brush as HGDIOBJ);
+                    let old_pen = SelectObject(dis.hdc, pen as HGDIOBJ);
+                    Polygon(dis.hdc, pts.as_ptr(), 3);
+                    SelectObject(dis.hdc, old_br);
+                    SelectObject(dis.hdc, old_pen);
+                    DeleteObject(brush as HGDIOBJ);
+                    DeleteObject(pen as HGDIOBJ);
+
+                    // Блокируем область стрелки от стандартной чёрной отрисовки MF_POPUP поверх темы
+                    let block_left = dis.rc_item.right - (22.0 * scale).round() as i32;
+                    ExcludeClipRect(
+                        dis.hdc,
+                        block_left,
+                        dis.rc_item.top,
+                        dis.rc_item.right,
+                        dis.rc_item.bottom,
+                    );
+                }
                 1
             }
             _ => DefWindowProcW(hwnd, msg, w_param, l_param),
@@ -471,6 +517,7 @@ pub mod native {
         ToggleMinimize,
         ImportCsv,
         EditConfig,
+        RestartToUpdate,
         Close,
     }
 
@@ -538,6 +585,7 @@ pub mod native {
         always_on_top: bool,
         minimized: bool,
         hide_taskbar: bool,
+        update_ready: bool,
         interval_sec: u64,
         target: MenuTarget<'_>,
     ) -> Option<NativeMenuAction> {
@@ -565,22 +613,27 @@ pub mod native {
                     let edit_lbl = match lang {
                         Language::Ru => format!("Редактировать «{}»...", name),
                         Language::En => format!("Edit \"{}\"...", name),
+                        Language::Hr => format!("Uredi \"{}\"...", name),
                     };
                     let clone_lbl = match lang {
                         Language::Ru => format!("Клонировать «{}»...", name),
                         Language::En => format!("Clone \"{}\"...", name),
+                        Language::Hr => format!("Kloniraj \"{}\"...", name),
                     };
                     let del_lbl = match lang {
                         Language::Ru => format!("Удалить «{}»", name),
                         Language::En => format!("Delete \"{}\"", name),
+                        Language::Hr => format!("Obriši \"{}\"", name),
                     };
                     let ren_grp = match lang {
                         Language::Ru => format!("Переименовать группу «{}»...", sec_name),
                         Language::En => format!("Rename group \"{}\"...", sec_name),
+                        Language::Hr => format!("Preimenuj grupu \"{}\"...", sec_name),
                     };
                     let del_grp = match lang {
                         Language::Ru => format!("Удалить группу «{}»", sec_name),
                         Language::En => format!("Delete group \"{}\"", sec_name),
+                        Language::Hr => format!("Obriši grupu \"{}\"", sec_name),
                     };
                     mb.add_item(hmenu, &edit_lbl, false, NativeMenuAction::EditCheck(sec_idx, chk_idx));
                     mb.add_item(hmenu, &clone_lbl, false, NativeMenuAction::CloneCheck(sec_idx, chk_idx));
@@ -596,14 +649,17 @@ pub mod native {
                     let add_in = match lang {
                         Language::Ru => format!("Добавить узел в «{}»...", name),
                         Language::En => format!("Add host to \"{}\"...", name),
+                        Language::Hr => format!("Dodaj čvor u \"{}\"...", name),
                     };
                     let ren_grp = match lang {
                         Language::Ru => format!("Переименовать группу «{}»...", name),
                         Language::En => format!("Rename group \"{}\"...", name),
+                        Language::Hr => format!("Preimenuj grupu \"{}\"...", name),
                     };
                     let del_grp = match lang {
                         Language::Ru => format!("Удалить группу «{}»", name),
                         Language::En => format!("Delete group \"{}\"", name),
+                        Language::Hr => format!("Obriši grupu \"{}\"", name),
                     };
                     mb.add_item(hmenu, &add_in, false, NativeMenuAction::AddCheck(sec_idx));
                     mb.add_item(hmenu, s.menu_add_group, false, NativeMenuAction::AddGroup);
@@ -671,6 +727,14 @@ pub mod native {
             mb.add_item(hmenu, s.menu_import_csv, false, NativeMenuAction::ImportCsv);
             mb.add_item(hmenu, s.menu_edit_config, false, NativeMenuAction::EditConfig);
             mb.add_sep(hmenu);
+            if update_ready {
+                mb.add_item(
+                    hmenu,
+                    s.menu_restart_update,
+                    false,
+                    NativeMenuAction::RestartToUpdate,
+                );
+            }
             if !matches!(target, MenuTarget::Tray) {
                 mb.add_item(
                     hmenu,

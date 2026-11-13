@@ -675,12 +675,16 @@ unsafe fn run_tray(
         if msg.message == WM_APP + 1 || msg.message == WM_APP + 2 {
             let lparam = msg.l_param as u32;
             if lparam == WM_LBUTTONUP || lparam == WM_RBUTTONUP {
-                let (aot, minimized, hide_taskbar, lang, is_dark, interval_sec) = {
+                let (aot, minimized, hide_taskbar, update_ready, lang, is_dark, interval_sec) = {
                     let st = state.lock().unwrap();
                     (
                         st.config.always_on_top,
                         st.minimized_to_tray,
                         st.config.hide_taskbar,
+                        matches!(
+                            st.update_status,
+                            crate::updater::UpdateStatus::ReadyToRestart(_)
+                        ),
                         st.config.language,
                         st.config.theme.resolve_is_dark(),
                         st.config.interval_sec,
@@ -692,6 +696,7 @@ unsafe fn run_tray(
                     aot,
                     minimized,
                     hide_taskbar,
+                    update_ready,
                     interval_sec,
                     crate::ui::menu::native::MenuTarget::Tray,
                 ) {

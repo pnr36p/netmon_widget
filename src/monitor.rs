@@ -48,11 +48,17 @@ pub struct MonitorInfo {
     pub is_primary: bool,
     pub monitor_rect: Rect,
     pub work_rect: Rect,
+    pub scale: f32,
 }
 
 impl MonitorInfo {
     pub fn contains_point(&self, p: Pos2) -> bool {
         self.monitor_rect.contains(p)
+    }
+
+    pub fn logical_work_rect(&self) -> Rect {
+        let s = self.scale.max(0.5);
+        Rect::from_min_max(self.work_rect.min / s, self.work_rect.max / s)
     }
 
     pub fn intersection_area(&self, r: &Rect) -> f32 {
@@ -63,6 +69,31 @@ impl MonitorInfo {
             0.0
         }
     }
+}
+
+fn query_monitor_scale(hmon: HMONITOR) -> f32 {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryA(lp_lib_file_name: *const i8) -> *mut c_void;
+        fn GetProcAddress(h_module: *mut c_void, lp_proc_name: *const i8) -> *const c_void;
+    }
+    type GetDpiForMonitorFn = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> i32;
+
+    unsafe {
+        let hmod = LoadLibraryA(b"shcore.dll\0".as_ptr() as *const i8);
+        if !hmod.is_null() {
+            let proc = GetProcAddress(hmod, b"GetDpiForMonitor\0".as_ptr() as *const i8);
+            if !proc.is_null() {
+                let func: GetDpiForMonitorFn = std::mem::transmute(proc);
+                let mut dpi_x: u32 = 96;
+                let mut dpi_y: u32 = 96;
+                if func(hmon, 0, &mut dpi_x, &mut dpi_y) == 0 && dpi_x >= 48 {
+                    return (dpi_x as f32 / 96.0).clamp(0.75, 4.0);
+                }
+            }
+        }
+    }
+    1.0
 }
 
 fn to_rect(r: &RECT) -> Rect {
@@ -93,6 +124,7 @@ unsafe extern "system" fn enum_proc(
             is_primary: (info.dw_flags & 1) != 0,
             monitor_rect: to_rect(&info.rc_monitor),
             work_rect: to_rect(&info.rc_work),
+            scale: query_monitor_scale(hmon),
         });
     }
     1
@@ -136,38 +168,51 @@ pub fn best_monitor_for_rect<'a>(monitors: &'a [MonitorInfo], rect: &Rect) -> Op
         .or_else(|| primary_or_first(monitors))
 }
 
-pub const SNAP_THRESHOLD: f32 = 20.0;
+pub const SNAP_THRESHOLD: f32 = 7.0;
 
 /// Прижимает координаты окна к краям рабочей зоны экрана (Desktop work area без панели задач),
-/// если расстояние до края меньше или равно порогу SNAP_THRESHOLD (20px).
-pub fn snap_to_work_area(mut pos: Pos2, size: Vec2, work: &Rect) -> Pos2 {
-    let right = pos.x + size.x;
-    let bottom = pos.y + size.y;
+/// если расстояние до края меньше или равно порогу threshold.
+pub fn snap_to_work_area_with_threshold(
+    mut pos: Pos2,
+    size: Vec2,
+    work: &Rect,
+    threshold: f32,
+    clamp_inside: bool,
+) -> Pos2 {
+    if threshold > 0.0 {
+        let right = pos.x + size.x;
+        let bottom = pos.y + size.y;
 
-    // 1. Прижатие к левому краю
-    if (pos.x - work.left()).abs() <= SNAP_THRESHOLD {
-        pos.x = work.left();
-    }
-    // 2. Прижатие к правому краю
-    if (work.right() - right).abs() <= SNAP_THRESHOLD {
-        pos.x = work.right() - size.x;
-    }
-    // 3. Прижатие к верхнему краю
-    if (pos.y - work.top()).abs() <= SNAP_THRESHOLD {
-        pos.y = work.top();
-    }
-    // 4. Прижатие к нижнему краю
-    if (work.bottom() - bottom).abs() <= SNAP_THRESHOLD {
-        pos.y = work.bottom() - size.y;
+        let dl = (pos.x - work.left()).abs();
+        let dr = (work.right() - right).abs();
+        if dl <= dr && dl <= threshold {
+            pos.x = work.left();
+        } else if dr <= threshold {
+            pos.x = work.right() - size.x;
+        }
+
+        let dt = (pos.y - work.top()).abs();
+        let db = (work.bottom() - bottom).abs();
+        if dt <= db && dt <= threshold {
+            pos.y = work.top();
+        } else if db <= threshold {
+            pos.y = work.bottom() - size.y;
+        }
     }
 
-    // Защитный clamp, чтобы окно не вылезало за видимую область экрана
-    let max_x = (work.right() - size.x).max(work.left());
-    let max_y = (work.bottom() - size.y).max(work.top());
-    pos.x = pos.x.clamp(work.left(), max_x);
-    pos.y = pos.y.clamp(work.top(), max_y);
+    if clamp_inside {
+        let max_x = (work.right() - size.x).max(work.left());
+        let max_y = (work.bottom() - size.y).max(work.top());
+        pos.x = pos.x.clamp(work.left(), max_x);
+        pos.y = pos.y.clamp(work.top(), max_y);
+    }
 
     pos
+}
+
+/// Прижимает координаты окна к краям рабочей зоны экрана с порогом SNAP_THRESHOLD и зажимом в границы экрана.
+pub fn snap_to_work_area(pos: Pos2, size: Vec2, work: &Rect) -> Pos2 {
+    snap_to_work_area_with_threshold(pos, size, work, SNAP_THRESHOLD, true)
 }
 
 /// Вычисляет относительную позицию окна на мониторе (0.0 .. 1.0 по X и Y)
@@ -231,17 +276,32 @@ pub fn place_child_near_main(
     saved_pos: Option<[f32; 2]>,
 ) -> Option<Pos2> {
     let monitors = get_all_monitors();
+    let best_logical = |r: &Rect| {
+        monitors.iter().max_by(|a, b| {
+            let la = a.logical_work_rect().intersect(*r);
+            let lb = b.logical_work_rect().intersect(*r);
+            let aa = if la.is_positive() { la.width() * la.height() } else { 0.0 };
+            let ab = if lb.is_positive() { lb.width() * lb.height() } else { 0.0 };
+            aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal)
+        })
+    };
+
     let main_mon = main_rect
-        .and_then(|r| best_monitor_for_rect(&monitors, &r))
+        .and_then(|r| best_logical(&r))
         .or_else(|| primary_or_first(&monitors))?;
 
     if let Some([sx, sy]) = saved_pos {
         let test_rect = Rect::from_min_size(Pos2::new(sx, sy), child_size);
-        let mon_for_saved = best_monitor_for_rect(&monitors, &test_rect).unwrap_or(main_mon);
-        return place_child_in_work_area(&mon_for_saved.work_rect, main_rect, child_size, Some([sx, sy]));
+        let mon_for_saved = best_logical(&test_rect).unwrap_or(main_mon);
+        return place_child_in_work_area(
+            &mon_for_saved.logical_work_rect(),
+            main_rect,
+            child_size,
+            Some([sx, sy]),
+        );
     }
 
-    place_child_in_work_area(&main_mon.work_rect, main_rect, child_size, None)
+    place_child_in_work_area(&main_mon.logical_work_rect(), main_rect, child_size, None)
 }
 
 #[cfg(test)]
@@ -252,10 +312,10 @@ mod tests {
     fn snap_sticks_when_close_to_right_edge() {
         let work = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1920.0, 1040.0));
         let size = Vec2::new(140.0, 500.0);
-        // 12px away from right edge (1920 - 140 = 1780 -> 1768 is 12px away)
-        let snapped = snap_to_work_area(Pos2::new(1768.0, 10.0), size, &work);
+        // 5px away from right edge (1920 - 140 = 1780 -> 1775 is 5px away <= 7px threshold)
+        let snapped = snap_to_work_area(Pos2::new(1775.0, 5.0), size, &work);
         assert_eq!(snapped.x, 1780.0);
-        assert_eq!(snapped.y, 0.0); // 10px <= 20px snap threshold from top
+        assert_eq!(snapped.y, 0.0); // 5px <= 7px snap threshold from top
     }
 
     #[test]
@@ -278,5 +338,29 @@ mod tests {
         let left_main = Rect::from_min_size(Pos2::new(10.0, 120.0), Vec2::new(140.0, 700.0));
         let pos_r = place_child_in_work_area(&work, Some(left_main), child_size, None).unwrap();
         assert_eq!(pos_r.x, 150.0 + 14.0);
+    }
+
+    #[test]
+    fn secondary_monitor_bottom_snap_is_flush() {
+        let work = Rect::from_min_max(Pos2::new(1920.0, 0.0), Pos2::new(3840.0, 1040.0));
+        let size = Vec2::new(160.0, 500.0);
+        // 5px above bottom (bottom = 1035 vs 1040) -> snaps cleanly flush to 1040 - 500 = 540
+        let snapped = snap_to_work_area_with_threshold(
+            Pos2::new(2200.0, 535.0),
+            size,
+            &work,
+            SNAP_THRESHOLD,
+            false,
+        );
+        assert_eq!(snapped, Pos2::new(2200.0, 540.0));
+        // Outside threshold -> moves freely without clamping/sticking
+        let free = snap_to_work_area_with_threshold(
+            Pos2::new(2200.0, 500.0),
+            size,
+            &work,
+            SNAP_THRESHOLD,
+            false,
+        );
+        assert_eq!(free, Pos2::new(2200.0, 500.0));
     }
 }

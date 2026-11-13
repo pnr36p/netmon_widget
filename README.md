@@ -31,8 +31,10 @@ A lightweight desktop network monitoring widget for Windows inspired by the clas
   - Tray icon menu on left/right click, **Minimize to tray** (`—`) / **Close** (`×`) header buttons, and **Hide window from taskbar** option..
 - **Per-host polling intervals & portable multi-instance support:**
   - Optional per-host `interval_sec` overriding the global polling interval.
-  - Size presets (`XS`/`S`/`M`/`L`/`XL`), free mouse width resizing, and background opacity slider.
-  - Per-monitor position tracking with edge snapping and automatic restoration when a disconnected display returns.
+  - Size presets (`XS`/`S`/`M`/`L`/`XL`), free mouse resizing from any border or corner, and background opacity slider.
+  - Per-monitor position tracking with live magnetic edge snapping (can be disabled in Settings) and automatic restoration when a disconnected display returns.
+  - **Weekly background auto-updates (Firefox-style):** Enabled by default (`auto_update = true`), checks GitHub Releases once a week, stages `netmon_widget.exe` in the background, and applies it on restart.
+  - **Multilingual UI:** English, Russian (`Русский`), and Croatian (`Hrvatski`).
   - **Launch on Windows startup** (`HKCU\...\Run` keyed by per-executable path hash), allowing multiple isolated instances to run side-by-side from separate folders.
   - Hot-reload support when editing `netmon_widget.toml` externally.
   - Legacy `Network.csv` import (including Windows-1251 encoding).

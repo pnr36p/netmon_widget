@@ -58,10 +58,39 @@ pub const CONFIG_HELP_HEADER_EN: &str = "\
 
 ";
 
+pub const CONFIG_HELP_HEADER_HR: &str = "\
+# ============================================================================
+# NetMon Widget — Konfiguracija (promjene se primjenjuju automatski)
+# ============================================================================
+# Dostupne vrste senzora (polje type):
+#   ping          — ICMP Ping
+#   tcp           — provjera povezivanja na TCP port (zadani port 80)
+#   http / https  — HTTP/HTTPS GET (očekuje odgovor 2xx/3xx; zadani portovi 80 / 443)
+#   dns           — UDP DNS upit prema DNS poslužitelju (IP:53) ili razrješavanje domene
+#
+# Nekritični senzori (pri nedostupnosti prikazuju žuti minus umjesto crvenog
+# križića i NE označavaju ikonu u trayu kao grešku):
+#   ping_optional, tcp_optional, http_optional, https_optional, dns_optional
+#   (ili dodajte optional = true bilo kojem standardnom tipu)
+#
+# Polja stavke [[sections.checks]]:
+#   name         — prikazani naziv
+#   host         — IP adresa ili naziv domene
+#   type         — vrsta senzora (vidi gore)
+#   port         — [neobvezno] port (za tcp/http/https/dns; ping ga ne koristi)
+#   timeout_ms   — [neobvezno] istek vremena u ms (zadano 3000)
+#   interval_sec — [neobvezno] vlastiti interval provjere u sek (zadano: opći)
+#   optional     — [neobvezno] true = nekritični čvor (zadano false)
+#   notify       — [neobvezno] true = skočne obavijesti pri promjeni stanja (zadano false)
+# ============================================================================
+
+";
+
 pub fn help_header(lang: Language) -> &'static str {
     match lang {
         Language::Ru => CONFIG_HELP_HEADER_RU,
         Language::En => CONFIG_HELP_HEADER_EN,
+        Language::Hr => CONFIG_HELP_HEADER_HR,
     }
 }
 
@@ -259,8 +288,14 @@ pub struct AppConfig {
     pub interval_sec: u64,
     #[serde(default = "default_opacity")]
     pub opacity: f32,
-    #[serde(default = "default_always_on_top")]
+    #[serde(default = "default_true")]
     pub always_on_top: bool,
+    #[serde(default = "default_true")]
+    pub edge_snapping: bool,
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    #[serde(default)]
+    pub last_update_check_ts: i64,
     #[serde(default, alias = "tray_only")]
     pub hide_taskbar: bool,
     #[serde(default)]
@@ -295,7 +330,7 @@ fn default_interval() -> u64 {
 fn default_opacity() -> f32 {
     0.85
 }
-fn default_always_on_top() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -305,6 +340,9 @@ impl Default for AppConfig {
             interval_sec: 5,
             opacity: 0.85,
             always_on_top: true,
+            edge_snapping: true,
+            auto_update: true,
+            last_update_check_ts: 0,
             hide_taskbar: false,
             language: Language::Ru,
             theme: ThemeMode::System,
@@ -564,6 +602,9 @@ pub fn save_config(cfg: &AppConfig) {
             disk_cfg.interval_sec = cfg.interval_sec;
             disk_cfg.opacity = cfg.opacity;
             disk_cfg.always_on_top = cfg.always_on_top;
+            disk_cfg.edge_snapping = cfg.edge_snapping;
+            disk_cfg.auto_update = cfg.auto_update;
+            disk_cfg.last_update_check_ts = cfg.last_update_check_ts;
             disk_cfg.hide_taskbar = cfg.hide_taskbar;
             disk_cfg.language = cfg.language;
             disk_cfg.theme = cfg.theme;
