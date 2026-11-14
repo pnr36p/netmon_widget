@@ -227,11 +227,8 @@ mod tests {
             name: "DNS".into(),
             host: "1.1.1.1".into(),
             kind: "dns".into(),
-            port: None,
             timeout_ms: 2000,
-            interval_sec: None,
-            optional: false,
-            notify: false,
+            ..Default::default()
         }
     }
 

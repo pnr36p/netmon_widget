@@ -106,6 +106,14 @@ where
     Ok(opt.filter(|&p| p > 0))
 }
 
+fn deserialize_opt_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<u32> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(opt.filter(|&v| v > 0))
+}
+
 fn deserialize_opt_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -138,6 +146,45 @@ pub struct CheckConfig {
     pub optional: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub notify: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_opt_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fail_threshold: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_opt_u64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub warn_ms: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_opt_port",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expect_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_text: Option<String>,
+}
+
+impl Default for CheckConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            host: String::new(),
+            kind: "ping".into(),
+            port: None,
+            timeout_ms: default_timeout(),
+            interval_sec: None,
+            optional: false,
+            notify: false,
+            fail_threshold: None,
+            warn_ms: None,
+            expect_status: None,
+            expect_text: None,
+        }
+    }
 }
 
 impl CheckConfig {
@@ -189,17 +236,23 @@ impl CheckConfig {
             .unwrap_or(global_interval_sec)
             .max(1)
     }
+
+    pub fn effective_fail_threshold(&self) -> u32 {
+        self.fail_threshold.unwrap_or(1).max(1)
+    }
 }
 
 fn default_timeout() -> u64 {
     3000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SectionConfig {
     pub name: String,
     #[serde(default)]
     pub checks: Vec<CheckConfig>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -279,6 +332,8 @@ pub struct AppConfig {
     pub last_update_check_ts: i64,
     #[serde(default, alias = "tray_only")]
     pub hide_taskbar: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_latency_in_list: bool,
     #[serde(default)]
     pub language: Language,
     #[serde(default)]
@@ -325,6 +380,7 @@ impl Default for AppConfig {
             auto_update: true,
             last_update_check_ts: 0,
             hide_taskbar: false,
+            show_latency_in_list: false,
             language: Language::Ru,
             theme: ThemeMode::System,
             size: SizePreset::S,
@@ -435,6 +491,7 @@ pub fn import_network_csv(path: &std::path::Path) -> Result<Vec<SectionConfig>, 
             current_sec = Some(SectionConfig {
                 name,
                 checks: Vec::new(),
+                collapsed: false,
             });
         } else if let Some(ref mut sec) = current_sec {
             if let Some((name_part, host_part)) = line.split_once(',') {
@@ -445,11 +502,8 @@ pub fn import_network_csv(path: &std::path::Path) -> Result<Vec<SectionConfig>, 
                         name,
                         host,
                         kind: "ping".into(),
-                        port: None,
                         timeout_ms: 2000,
-                        interval_sec: None,
-                        optional: false,
-                        notify: false,
+                        ..Default::default()
                     });
                 }
             }
@@ -465,6 +519,27 @@ pub fn import_network_csv(path: &std::path::Path) -> Result<Vec<SectionConfig>, 
     }
 
     Ok(sections)
+}
+
+/// Экспортирует секции и хосты в формат Network.csv.
+pub fn export_network_csv(path: &std::path::Path, sections: &[SectionConfig]) -> Result<(), String> {
+    let mut out = String::new();
+    for (idx, sec) in sections.iter().enumerate() {
+        if idx > 0 {
+            out.push_str("\r\n");
+        }
+        out.push('<');
+        out.push_str(sec.name.trim());
+        out.push_str(">\r\n");
+        for chk in &sec.checks {
+            out.push_str(chk.name.trim());
+            out.push_str(", ");
+            out.push_str(chk.host.trim());
+            out.push_str("\r\n");
+        }
+    }
+    atomic_write(path, out.as_bytes())
+        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
 /// Портативный путь к конфигу: всегда рядом с exe (чтобы две копии из разных папок не мешали друг другу).
@@ -564,26 +639,21 @@ pub fn load_config() -> AppConfig {
     if cfg.sections.is_empty() {
         cfg.sections = vec![SectionConfig {
             name: "Internet".into(),
+            collapsed: false,
             checks: vec![
                 CheckConfig {
                     name: "DNS Cloudflare".into(),
                     host: "1.1.1.1".into(),
                     kind: "ping".into(),
-                    port: None,
                     timeout_ms: 2000,
-                    interval_sec: None,
-                    optional: false,
-                    notify: false,
+                    ..Default::default()
                 },
                 CheckConfig {
                     name: "Google DNS".into(),
                     host: "8.8.8.8".into(),
                     kind: "dns".into(),
-                    port: None,
                     timeout_ms: 2000,
-                    interval_sec: None,
-                    optional: false,
-                    notify: false,
+                    ..Default::default()
                 },
                 CheckConfig {
                     name: "Google HTTPS".into(),
@@ -591,9 +661,7 @@ pub fn load_config() -> AppConfig {
                     kind: "https".into(),
                     port: Some(443),
                     timeout_ms: 3000,
-                    interval_sec: None,
-                    optional: false,
-                    notify: false,
+                    ..Default::default()
                 },
             ],
         }];
@@ -619,6 +687,7 @@ pub fn save_config(cfg: &AppConfig) {
                 disk_cfg.auto_update = cfg.auto_update;
                 disk_cfg.last_update_check_ts = cfg.last_update_check_ts;
                 disk_cfg.hide_taskbar = cfg.hide_taskbar;
+                disk_cfg.show_latency_in_list = cfg.show_latency_in_list;
                 disk_cfg.language = cfg.language;
                 disk_cfg.theme = cfg.theme;
                 disk_cfg.size = cfg.size;

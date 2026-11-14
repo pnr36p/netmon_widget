@@ -16,12 +16,36 @@ pub struct CheckState {
     pub ok_count: u32,
     pub total_count: u32,
     pub last_ok_at: Option<DateTime<Local>>,
+    pub consecutive_failures: u32,
+}
+
+impl CheckState {
+    pub fn new(config: CheckConfig) -> Self {
+        Self {
+            config,
+            result: None,
+            ok_count: 0,
+            total_count: 0,
+            last_ok_at: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    pub fn is_high_latency(&self) -> bool {
+        let Some(warn) = self.config.warn_ms.filter(|&w| w > 0) else {
+            return false;
+        };
+        self.result
+            .as_ref()
+            .is_some_and(|r| r.ok && r.latency_ms.is_some_and(|ms| ms >= warn))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct SectionState {
     pub name: String,
     pub checks: Vec<CheckState>,
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +62,10 @@ pub struct EditHostState {
     pub port_str: String,
     pub timeout_str: String,
     pub interval_str: String,
+    pub fail_threshold_str: String,
+    pub warn_ms_str: String,
+    pub expect_status_str: String,
+    pub expect_text: String,
     pub error_msg: Option<String>,
 }
 
@@ -60,6 +88,22 @@ impl EditHostState {
                 .interval_sec
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
+            fail_threshold_str: check
+                .config
+                .fail_threshold
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            warn_ms_str: check
+                .config
+                .warn_ms
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            expect_status_str: check
+                .config
+                .expect_status
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            expect_text: check.config.expect_text.clone().unwrap_or_default(),
             error_msg: None,
         }
     }
@@ -85,6 +129,10 @@ impl EditHostState {
             port_str: String::new(),
             timeout_str: "2000".to_string(),
             interval_str: String::new(),
+            fail_threshold_str: String::new(),
+            warn_ms_str: String::new(),
+            expect_status_str: String::new(),
+            expect_text: String::new(),
             error_msg: None,
         }
     }
@@ -155,6 +203,9 @@ pub struct AppState {
     pub update_status: crate::updater::UpdateStatus,
     pub manual_update_check_requested: bool,
     pub restart_for_update_requested: bool,
+    pub polling_paused: bool,
+    pub notifications_muted: bool,
+    pub notifications_muted_until: Option<std::time::Instant>,
     pub pending_notifications: std::collections::VecDeque<TrayNotification>,
 }
 
@@ -168,14 +219,9 @@ impl AppState {
                 checks: s
                     .checks
                     .iter()
-                    .map(|c| CheckState {
-                        config: c.clone(),
-                        result: None,
-                        ok_count: 0,
-                        total_count: 0,
-                        last_ok_at: None,
-                    })
+                    .map(|c| CheckState::new(c.clone()))
                     .collect(),
+                collapsed: s.collapsed,
             })
             .collect();
 
@@ -210,6 +256,9 @@ impl AppState {
             update_status: crate::updater::UpdateStatus::Idle,
             manual_update_check_requested: false,
             restart_for_update_requested: false,
+            polling_paused: false,
+            notifications_muted: false,
+            notifications_muted_until: None,
             pending_notifications: std::collections::VecDeque::new(),
         }
     }
@@ -278,14 +327,40 @@ impl AppState {
                     ok_count: existing.map(|ch| ch.ok_count).unwrap_or(0),
                     total_count: existing.map(|ch| ch.total_count).unwrap_or(0),
                     last_ok_at: existing.and_then(|ch| ch.last_ok_at),
+                    consecutive_failures: existing.map(|ch| ch.consecutive_failures).unwrap_or(0),
                 });
             }
             new_sections.push(SectionState {
                 name: s.name.clone(),
                 checks,
+                collapsed: s.collapsed,
             });
         }
         self.sections = new_sections;
+    }
+
+    pub fn is_notifications_muted(&mut self) -> bool {
+        if let Some(until) = self.notifications_muted_until {
+            if std::time::Instant::now() >= until {
+                self.notifications_muted_until = None;
+            } else {
+                return true;
+            }
+        }
+        self.notifications_muted
+    }
+
+    pub fn toggle_section_collapsed(&mut self, sec_idx: usize) {
+        if let Some(sec) = self.sections.get_mut(sec_idx) {
+            sec.collapsed = !sec.collapsed;
+            if let Some(cfg_sec) = self.config.sections.get_mut(sec_idx) {
+                cfg_sec.collapsed = sec.collapsed;
+            }
+            crate::config::save_config_with_sections(&self.config);
+            self.config_modified = std::fs::metadata(crate::config::config_path())
+                .and_then(|m| m.modified())
+                .ok();
+        }
     }
 
     pub fn apply_result_checked(
@@ -318,17 +393,36 @@ impl AppState {
 
     pub fn apply_result(&mut self, section_idx: usize, check_idx: usize, res: CheckResult) {
         let lang = self.config.language;
+        let muted = self.is_notifications_muted();
         if let Some(sec) = self.sections.get_mut(section_idx) {
             if let Some(ch) = sec.checks.get_mut(check_idx) {
                 let prev_ok = ch.result.as_ref().map(|r| r.ok);
-                self.uptime_history
-                    .record(&ch.config, res.timestamp.timestamp(), res.ok);
+                let threshold = ch.config.effective_fail_threshold();
                 ch.total_count = ch.total_count.saturating_add(1);
-                if res.ok {
+
+                let effective_ok = if res.ok {
+                    ch.consecutive_failures = 0;
                     ch.ok_count = ch.ok_count.saturating_add(1);
                     ch.last_ok_at = Some(res.timestamp);
+                    true
+                } else {
+                    ch.consecutive_failures = ch.consecutive_failures.saturating_add(1);
+                    ch.consecutive_failures < threshold
+                };
+
+                if !res.ok && effective_ok {
+                    if let Some(prev) = ch.result.as_mut() {
+                        prev.timestamp = res.timestamp;
+                        prev.error = res.error;
+                    }
+                    self.uptime_history
+                        .record(&ch.config, res.timestamp.timestamp(), true);
+                    return;
                 }
-                if ch.config.notify {
+
+                self.uptime_history
+                    .record(&ch.config, res.timestamp.timestamp(), res.ok);
+                if ch.config.notify && !muted {
                     if let Some(notif) = build_status_notification(&ch.config, prev_ok, &res, lang) {
                         if self.pending_notifications.len() >= 32 {
                             self.pending_notifications.pop_front();
@@ -499,6 +593,7 @@ pub struct StatusSummary {
     pub total_count: usize,
     pub optional_down_count: usize,
     pub down_critical_names: Vec<String>,
+    pub paused: bool,
 }
 
 impl AppState {
@@ -560,6 +655,7 @@ impl AppState {
             total_count,
             optional_down_count,
             down_critical_names,
+            paused: self.polling_paused,
         }
     }
 }
@@ -623,11 +719,17 @@ mod tests {
             name: name.into(),
             host: "127.0.0.1".into(),
             kind: kind.into(),
-            port: None,
             timeout_ms: 1000,
-            interval_sec: None,
             optional,
-            notify: false,
+            ..Default::default()
+        }
+    }
+
+    fn make_section(name: &str, checks: Vec<CheckConfig>) -> SectionConfig {
+        SectionConfig {
+            name: name.into(),
+            checks,
+            collapsed: false,
         }
     }
 
@@ -643,13 +745,13 @@ mod tests {
     #[test]
     fn optional_check_offline_keeps_overall_ok() {
         let cfg = AppConfig {
-            sections: vec![SectionConfig {
-                name: "LAN".into(),
-                checks: vec![
+            sections: vec![make_section(
+                "LAN",
+                vec![
                     make_check("Router", "ping", false),
                     make_check("Canon MFD", "ping_optional", false),
                 ],
-            }],
+            )],
             ..Default::default()
         };
         let mut st = AppState::from_config(&cfg);
@@ -668,13 +770,13 @@ mod tests {
     #[test]
     fn critical_check_offline_triggers_error() {
         let cfg = AppConfig {
-            sections: vec![SectionConfig {
-                name: "Internet".into(),
-                checks: vec![
+            sections: vec![make_section(
+                "Internet",
+                vec![
                     make_check("DNS", "ping", false),
                     make_check("Canon MFD", "ping", true),
                 ],
-            }],
+            )],
             ..Default::default()
         };
         let mut st = AppState::from_config(&cfg);
@@ -729,17 +831,14 @@ port = 8080
     fn move_checks_and_swap_sections_keep_config_and_state_in_sync() {
         let cfg = AppConfig {
             sections: vec![
-                SectionConfig {
-                    name: "G1".into(),
-                    checks: vec![
+                make_section(
+                    "G1",
+                    vec![
                         make_check("A", "ping", false),
                         make_check("B", "ping", false),
                     ],
-                },
-                SectionConfig {
-                    name: "G2".into(),
-                    checks: vec![make_check("C", "ping", false)],
-                },
+                ),
+                make_section("G2", vec![make_check("C", "ping", false)]),
             ],
             ..Default::default()
         };
@@ -801,10 +900,7 @@ type = "ping"
 
         let cfg = AppConfig {
             language: crate::i18n::Language::En,
-            sections: vec![SectionConfig {
-                name: "LAN".into(),
-                checks: vec![silent, loud],
-            }],
+            sections: vec![make_section("LAN", vec![silent, loud])],
             ..Default::default()
         };
         let mut st = AppState::from_config(&cfg);
@@ -850,10 +946,7 @@ type = "ping"
 
         let initial_cfg = AppConfig {
             interval_sec: 15,
-            sections: vec![SectionConfig {
-                name: "Core".into(),
-                checks: vec![make_check("GW", "ping", false)],
-            }],
+            sections: vec![make_section("Core", vec![make_check("GW", "ping", false)])],
             ..Default::default()
         };
         std::fs::write(&path, toml::to_string_pretty(&initial_cfg).unwrap()).unwrap();
@@ -883,5 +976,74 @@ type = "ping"
         assert_eq!(st.sections[0].name, "Core");
         assert_eq!(st.sections[0].checks.len(), 1);
         assert_eq!(st.sections[0].checks[0].config.name, "GW");
+    }
+
+    #[test]
+    fn fail_threshold_suppresses_transient_drops_until_reached() {
+        let mut chk = make_check("Flaky", "ping", false);
+        chk.fail_threshold = Some(2);
+        chk.notify = true;
+
+        let cfg = AppConfig {
+            language: crate::i18n::Language::En,
+            sections: vec![make_section("WAN", vec![chk])],
+            ..Default::default()
+        };
+        let mut st = AppState::from_config(&cfg);
+
+        // Goes online first
+        st.apply_result(0, 0, make_res(true));
+        assert!(st.sections[0].checks[0].result.as_ref().unwrap().ok);
+
+        // 1st failure stays online and does not notify
+        st.apply_result(0, 0, make_res(false));
+        assert!(st.sections[0].checks[0].result.as_ref().unwrap().ok);
+        assert_eq!(st.sections[0].checks[0].consecutive_failures, 1);
+        assert!(st.pending_notifications.is_empty());
+
+        // 2nd consecutive failure transitions to offline and notifies
+        st.apply_result(0, 0, make_res(false));
+        assert!(!st.sections[0].checks[0].result.as_ref().unwrap().ok);
+        assert_eq!(st.sections[0].checks[0].consecutive_failures, 2);
+        assert_eq!(st.pending_notifications.len(), 1);
+
+        // Success resets consecutive_failures
+        st.apply_result(0, 0, make_res(true));
+        assert_eq!(st.sections[0].checks[0].consecutive_failures, 0);
+        assert!(st.sections[0].checks[0].result.as_ref().unwrap().ok);
+    }
+
+    #[test]
+    fn warn_ms_and_csv_export_import_roundtrip() {
+        let mut chk = make_check("SlowHost", "ping", false);
+        chk.warn_ms = Some(100);
+        let cfg = AppConfig {
+            sections: vec![make_section("LAN", vec![chk])],
+            ..Default::default()
+        };
+        let mut st = AppState::from_config(&cfg);
+        st.apply_result(
+            0,
+            0,
+            CheckResult {
+                ok: true,
+                latency_ms: Some(150),
+                error: None,
+                timestamp: Local::now(),
+            },
+        );
+        assert!(st.sections[0].checks[0].is_high_latency());
+
+        let mut csv_path = std::env::temp_dir();
+        csv_path.push(format!("netmon_csv_roundtrip_{}.csv", std::process::id()));
+        crate::config::export_network_csv(&csv_path, &cfg.sections).unwrap();
+        let imported = crate::config::import_network_csv(&csv_path).unwrap();
+        let _ = std::fs::remove_file(&csv_path);
+
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].name, "LAN");
+        assert_eq!(imported[0].checks.len(), 1);
+        assert_eq!(imported[0].checks[0].name, "SlowHost");
+        assert_eq!(imported[0].checks[0].host, "127.0.0.1");
     }
 }

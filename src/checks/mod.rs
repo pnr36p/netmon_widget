@@ -21,8 +21,28 @@ pub async fn run_check(cfg: &CheckConfig) -> CheckResult {
         },
         _ => {
             let outcome = match kind {
-                "https" => https::check(&host, port, true, timeout).await,
-                "http" => https::check(&host, port, false, timeout).await,
+                "https" => {
+                    https::check(
+                        &host,
+                        port,
+                        true,
+                        timeout,
+                        cfg.expect_status,
+                        cfg.expect_text.as_deref(),
+                    )
+                    .await
+                }
+                "http" => {
+                    https::check(
+                        &host,
+                        port,
+                        false,
+                        timeout,
+                        cfg.expect_status,
+                        cfg.expect_text.as_deref(),
+                    )
+                    .await
+                }
                 "dns" => dns::resolve(&host, port, timeout).await,
                 "tcp" => tcp::connect(&host, port, timeout).await,
                 other => Err(format!("unknown check type: {}", other)),

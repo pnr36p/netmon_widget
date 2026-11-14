@@ -396,6 +396,12 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                                     state.save_settings_to_disk();
                                 }
 
+                                let mut show_lat = state.config.show_latency_in_list;
+                                if ui.checkbox(&mut show_lat, s.settings_show_latency).changed() {
+                                    state.config.show_latency_in_list = show_lat;
+                                    state.save_settings_to_disk();
+                                }
+
                                 let mut auto = state.autostart_enabled;
                                 if ui.checkbox(&mut auto, s.settings_autostart).changed() {
                                     match crate::platform::set_autostart(auto) {

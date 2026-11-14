@@ -23,6 +23,7 @@ struct NetmonApp {
     rx: UnboundedReceiver<CheckUpdate>,
     trigger_tx: tokio::sync::mpsc::UnboundedSender<()>,
     cfg_tx: tokio::sync::watch::Sender<crate::config::AppConfig>,
+    pause_tx: tokio::sync::watch::Sender<bool>,
     tray_rx: mpsc::Receiver<tray::TrayCommand>,
     update_cmd_tx: tokio::sync::mpsc::UnboundedSender<updater::UpdateCommand>,
     update_evt_rx: UnboundedReceiver<updater::UpdateEvent>,
@@ -111,6 +112,9 @@ impl eframe::App for NetmonApp {
         if st.scheduler_needs_sync {
             st.scheduler_needs_sync = false;
             let _ = self.cfg_tx.send(st.config.clone());
+        }
+        if *self.pause_tx.borrow() != st.polling_paused {
+            let _ = self.pause_tx.send(st.polling_paused);
         }
         if st.manual_refresh_requested {
             st.manual_refresh_requested = false;
@@ -243,7 +247,10 @@ fn main() -> eframe::Result<()> {
         + cfg
             .sections
             .iter()
-            .map(|s| cfg.size.header_height() + s.checks.len() as f32 * cfg.size.row_height())
+            .map(|s| {
+                let rows = if s.collapsed { 0.0 } else { s.checks.len() as f32 };
+                cfg.size.header_height() + rows * cfg.size.row_height()
+            })
             .sum::<f32>()
         + 4.0;
     let initial_width = cfg.custom_width.unwrap_or_else(|| cfg.size.width());
@@ -315,13 +322,14 @@ fn main() -> eframe::Result<()> {
 
     let (cfg_tx, cfg_rx) = tokio::sync::watch::channel(cfg.clone());
     let cfg_rx_upd = cfg_tx.subscribe();
+    let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
     let (update_cmd_tx, update_cmd_rx) = unbounded_channel::<updater::UpdateCommand>();
     let (update_evt_tx, update_evt_rx) = unbounded_channel::<updater::UpdateEvent>();
 
     let egui_ctx_slot: Arc<Mutex<Option<eframe::egui::Context>>> = Arc::new(Mutex::new(None));
     let app_state = Arc::new(Mutex::new(AppState::from_config(&cfg)));
     let _guard = rt.enter();
-    scheduler::spawn_scheduler(cfg_rx, tx, trigger_rx, egui_ctx_slot.clone());
+    scheduler::spawn_scheduler(cfg_rx, tx, trigger_rx, pause_rx, egui_ctx_slot.clone());
     updater::spawn_updater(
         update_cmd_rx,
         cfg_rx_upd,
@@ -382,6 +390,7 @@ fn main() -> eframe::Result<()> {
                 rx,
                 trigger_tx,
                 cfg_tx,
+                pause_tx,
                 tray_rx,
                 update_cmd_tx,
                 update_evt_rx,

@@ -43,8 +43,8 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
 
     let mut builder = egui::ViewportBuilder::default()
         .with_title(title)
-        .with_inner_size([360.0, 435.0])
-        .with_min_inner_size([330.0, 395.0])
+        .with_inner_size([360.0, 520.0])
+        .with_min_inner_size([330.0, 440.0])
         .with_resizable(false)
         .with_always_on_top();
 
@@ -154,6 +154,40 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                                 .hint_text(s.hint_interval_global),
                         );
                         ui.end_row();
+
+                        ui.label(s.field_fail_threshold);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut edit.fail_threshold_str)
+                                .desired_width(120.0)
+                                .hint_text(s.hint_default_1),
+                        );
+                        ui.end_row();
+
+                        ui.label(s.field_warn_ms);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut edit.warn_ms_str)
+                                .desired_width(120.0)
+                                .hint_text(s.hint_optional_ms),
+                        );
+                        ui.end_row();
+
+                        if edit.base_kind == "http" || edit.base_kind == "https" {
+                            ui.label(s.field_expect_status);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut edit.expect_status_str)
+                                    .desired_width(120.0)
+                                    .hint_text("2xx / 3xx"),
+                            );
+                            ui.end_row();
+
+                            ui.label(s.field_expect_text);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut edit.expect_text)
+                                    .desired_width(210.0)
+                                    .hint_text(s.hint_optional_ms),
+                            );
+                            ui.end_row();
+                        }
                     });
 
                 ui.add_space(4.0);
@@ -297,10 +331,12 @@ pub fn draw_group(ctx: &egui::Context, state: &mut AppState) {
                                 state.config.sections.push(SectionConfig {
                                     name: trimmed.clone(),
                                     checks: Vec::new(),
+                                    collapsed: false,
                                 });
                                 state.sections.push(SectionState {
                                     name: trimmed,
                                     checks: Vec::new(),
+                                    collapsed: false,
                                 });
                             }
                             state.sync_config_to_disk();
@@ -373,6 +409,64 @@ fn build_updated_config(edit: &EditHostState, lang: Language) -> Result<CheckCon
         if v == 0 { None } else { Some(v) }
     };
 
+    let thr_trim = edit.fail_threshold_str.trim();
+    let fail_threshold = if thr_trim.is_empty() {
+        None
+    } else {
+        let v = thr_trim
+            .parse::<u32>()
+            .map_err(|_| s.err_invalid_threshold.to_string())?;
+        if v == 0 {
+            return Err(s.err_invalid_threshold.to_string());
+        } else if v == 1 {
+            None
+        } else {
+            Some(v)
+        }
+    };
+
+    let warn_trim = edit.warn_ms_str.trim();
+    let warn_ms = if warn_trim.is_empty() {
+        None
+    } else {
+        let v = warn_trim
+            .parse::<u64>()
+            .map_err(|_| s.err_invalid_warn_ms.to_string())?;
+        if v == 0 {
+            return Err(s.err_invalid_warn_ms.to_string());
+        }
+        Some(v)
+    };
+
+    let is_http = edit.base_kind == "http" || edit.base_kind == "https";
+    let expect_status = if !is_http {
+        None
+    } else {
+        let st_trim = edit.expect_status_str.trim();
+        if st_trim.is_empty() {
+            None
+        } else {
+            let v = st_trim
+                .parse::<u16>()
+                .map_err(|_| s.err_invalid_status.to_string())?;
+            if !(100..=599).contains(&v) {
+                return Err(s.err_invalid_status.to_string());
+            }
+            Some(v)
+        }
+    };
+
+    let expect_text = if !is_http {
+        None
+    } else {
+        let t = edit.expect_text.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    };
+
     let kind = if edit.optional {
         format!("{}_optional", edit.base_kind)
     } else {
@@ -388,6 +482,10 @@ fn build_updated_config(edit: &EditHostState, lang: Language) -> Result<CheckCon
         interval_sec,
         optional: false,
         notify: edit.notify,
+        fail_threshold,
+        warn_ms,
+        expect_status,
+        expect_text,
     })
 }
 
@@ -401,13 +499,7 @@ fn apply_edit(state: &mut AppState, edit: &EditHostState, new_chk: CheckConfig) 
             sec_cfg.checks.push(new_chk.clone());
         }
         if let Some(sec_st) = state.sections.get_mut(dest_idx) {
-            sec_st.checks.push(CheckState {
-                config: new_chk,
-                result: None,
-                ok_count: 0,
-                total_count: 0,
-                last_ok_at: None,
-            });
+            sec_st.checks.push(CheckState::new(new_chk));
         }
         state.sync_config_to_disk();
         state.manual_refresh_requested = true;
@@ -423,7 +515,9 @@ fn apply_edit(state: &mut AppState, edit: &EditHostState, new_chk: CheckConfig) 
     let old_chk = &state.config.sections[edit.section_idx].checks[edit.check_idx];
     let target_changed = old_chk.host != new_chk.host
         || old_chk.base_kind() != new_chk.base_kind()
-        || old_chk.effective_port() != new_chk.effective_port();
+        || old_chk.effective_port() != new_chk.effective_port()
+        || old_chk.expect_status != new_chk.expect_status
+        || old_chk.expect_text != new_chk.expect_text;
 
     if dest_idx == edit.section_idx {
         state.config.sections[edit.section_idx].checks[edit.check_idx] = new_chk.clone();
@@ -438,6 +532,7 @@ fn apply_edit(state: &mut AppState, edit: &EditHostState, new_chk: CheckConfig) 
                 ch_state.ok_count = 0;
                 ch_state.total_count = 0;
                 ch_state.last_ok_at = None;
+                ch_state.consecutive_failures = 0;
             }
         }
     } else {
@@ -457,17 +552,12 @@ fn apply_edit(state: &mut AppState, edit: &EditHostState, new_chk: CheckConfig) 
                 st.result = None;
                 st.ok_count = 0;
                 st.total_count = 0;
+                st.consecutive_failures = 0;
                 ch_reset_opt(&mut st);
             }
             st
         } else {
-            CheckState {
-                config: new_chk,
-                result: None,
-                ok_count: 0,
-                total_count: 0,
-                last_ok_at: None,
-            }
+            CheckState::new(new_chk)
         };
 
         if let Some(dest_sec) = state.sections.get_mut(dest_idx) {

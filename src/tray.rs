@@ -364,6 +364,12 @@ fn encode_wide(s: &str) -> Vec<u16> {
 
 fn format_tray_tooltip(summary: &StatusSummary, lang: crate::i18n::Language) -> String {
     let s = crate::i18n::tr(lang);
+    if summary.paused {
+        return format!(
+            "NetMon Widget — {} ({}/{})",
+            s.tray_paused, summary.online_count, summary.total_count
+        );
+    }
     match summary.overall {
         OverallStatus::Ok => {
             if summary.optional_down_count > 0 {
@@ -679,7 +685,8 @@ unsafe fn run_tray(
             let lparam = msg.l_param as u32;
             if lparam == WM_LBUTTONUP || lparam == WM_RBUTTONUP {
                 let opts = {
-                    let st = state.lock().unwrap();
+                    let mut st = state.lock().unwrap();
+                    let muted = st.is_notifications_muted();
                     crate::ui::menu::native::PopupMenuState {
                         lang: st.config.language,
                         is_dark: st.config.theme.resolve_is_dark(),
@@ -691,6 +698,8 @@ unsafe fn run_tray(
                             crate::updater::UpdateStatus::ReadyToRestart(_)
                         ),
                         interval_sec: st.config.interval_sec,
+                        paused: st.polling_paused,
+                        muted,
                     }
                 };
                 if let Some(act) = crate::ui::menu::native::show_popup(

@@ -501,6 +501,7 @@ pub mod native {
             chk_idx: usize,
             name: &'a str,
             sec_name: &'a str,
+            is_http: bool,
         },
     }
 
@@ -508,6 +509,10 @@ pub mod native {
     pub enum NativeMenuAction {
         EditCheck(usize, usize),
         CloneCheck(usize, usize),
+        CopyHost(usize, usize),
+        OpenInBrowser(usize, usize),
+        DiagPing(usize, usize),
+        DiagTracert(usize, usize),
         AddCheck(usize),
         DeleteCheck(usize, usize),
         AddGroup,
@@ -515,11 +520,14 @@ pub mod native {
         DeleteGroup(usize),
         SetInterval(u64),
         Refresh,
+        TogglePause,
+        MuteForMinutes(u64),
         Settings,
         ToggleAlwaysOnTop,
         ToggleHideTaskbar,
         ToggleMinimize,
         ImportCsv,
+        ExportCsv,
         EditConfig,
         RestartToUpdate,
         Close,
@@ -534,6 +542,8 @@ pub mod native {
         pub hide_taskbar: bool,
         pub update_ready: bool,
         pub interval_sec: u64,
+        pub paused: bool,
+        pub muted: bool,
     }
 
     struct MenuBuilder {
@@ -639,6 +649,7 @@ pub mod native {
                     chk_idx,
                     name,
                     sec_name,
+                    is_http,
                 } => {
                     let edit_lbl = s.menu_edit_host.replace("{}", name);
                     let clone_lbl = s.menu_clone_host.replace("{}", name);
@@ -647,6 +658,13 @@ pub mod native {
                     let del_grp = s.menu_delete_group.replace("{}", sec_name);
                     mb.add_item(hmenu, &edit_lbl, false, NativeMenuAction::EditCheck(sec_idx, chk_idx));
                     mb.add_item(hmenu, &clone_lbl, false, NativeMenuAction::CloneCheck(sec_idx, chk_idx));
+                    mb.add_item(hmenu, s.menu_copy_host, false, NativeMenuAction::CopyHost(sec_idx, chk_idx));
+                    if is_http {
+                        mb.add_item(hmenu, s.menu_open_browser, false, NativeMenuAction::OpenInBrowser(sec_idx, chk_idx));
+                    }
+                    mb.add_item(hmenu, s.menu_diag_ping, false, NativeMenuAction::DiagPing(sec_idx, chk_idx));
+                    mb.add_item(hmenu, s.menu_diag_tracert, false, NativeMenuAction::DiagTracert(sec_idx, chk_idx));
+                    mb.add_sep(hmenu);
                     mb.add_item(hmenu, s.menu_add_host, false, NativeMenuAction::AddCheck(sec_idx));
                     mb.add_item(hmenu, &del_lbl, false, NativeMenuAction::DeleteCheck(sec_idx, chk_idx));
                     mb.add_sep(hmenu);
@@ -686,6 +704,33 @@ pub mod native {
             }
 
             mb.add_item(hmenu, s.menu_refresh, false, NativeMenuAction::Refresh);
+            mb.add_item(
+                hmenu,
+                if opts.paused {
+                    s.menu_resume_checks
+                } else {
+                    s.menu_pause_checks
+                },
+                opts.paused,
+                NativeMenuAction::TogglePause,
+            );
+
+            let sub_mute = CreatePopupMenu();
+            if !sub_mute.is_null() {
+                if opts.muted {
+                    mb.add_item(sub_mute, s.menu_unmute, false, NativeMenuAction::MuteForMinutes(0));
+                    mb.add_sep(sub_mute);
+                }
+                mb.add_item(sub_mute, s.menu_mute_15m, false, NativeMenuAction::MuteForMinutes(15));
+                mb.add_item(sub_mute, s.menu_mute_1h, false, NativeMenuAction::MuteForMinutes(60));
+                mb.add_item(
+                    sub_mute,
+                    s.menu_mute_forever,
+                    opts.muted,
+                    NativeMenuAction::MuteForMinutes(u64::MAX),
+                );
+                mb.add_popup(hmenu, sub_mute, s.menu_mute_sub.to_string());
+            }
 
             // Подменю общего интервала опроса
             let sub_interval = CreatePopupMenu();
@@ -723,6 +768,7 @@ pub mod native {
             );
             mb.add_sep(hmenu);
             mb.add_item(hmenu, s.menu_import_csv, false, NativeMenuAction::ImportCsv);
+            mb.add_item(hmenu, s.menu_export_csv, false, NativeMenuAction::ExportCsv);
             mb.add_item(hmenu, s.menu_edit_config, false, NativeMenuAction::EditConfig);
             mb.add_sep(hmenu);
             if update_ready {

@@ -1,6 +1,6 @@
 # NetMon Widget
 
-> [English](README.md) | **Русский**
+> [English](README.md) | **Русский** | [Hrvatski](README.hr.md)
 
 Компактный десктопный виджет мониторинга сети для Windows, вдохновлённый классическим **Network Monitor Gadget** (Windows 7) от Sam Tucker. Написан на Rust с использованием `eframe` / `egui` и нативного Win32 API (трей, всплывающие уведомления, плавающая подсказка, тёмное/светлое контекстное меню).
 

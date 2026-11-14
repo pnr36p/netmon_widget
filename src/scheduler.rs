@@ -18,6 +18,7 @@ pub fn spawn_scheduler(
     mut cfg_rx: watch::Receiver<AppConfig>,
     tx: UnboundedSender<CheckUpdate>,
     mut trigger_rx: UnboundedReceiver<()>,
+    mut pause_rx: watch::Receiver<bool>,
     egui_ctx: Arc<Mutex<Option<eframe::egui::Context>>>,
 ) {
     tokio::spawn(async move {
@@ -25,6 +26,25 @@ pub fn spawn_scheduler(
         let mut force_all = true;
 
         loop {
+            if *pause_rx.borrow() {
+                tokio::select! {
+                    res = pause_rx.changed() => {
+                        if res.is_err() {
+                            break;
+                        }
+                        if !*pause_rx.borrow() {
+                            force_all = true;
+                        }
+                    }
+                    res = cfg_rx.changed() => {
+                        if res.is_err() {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+
             let current_cfg = cfg_rx.borrow().clone();
             let now = Instant::now();
 
@@ -55,6 +75,12 @@ pub fn spawn_scheduler(
                         _ = tokio::time::sleep_until(tokio::time::Instant::from_std(target_instant)) => {}
                         Some(_) = trigger_rx.recv() => {
                             force_all = true;
+                        }
+                        res = pause_rx.changed() => {
+                            if res.is_err() {
+                                break;
+                            }
+                            continue;
                         }
                         res = cfg_rx.changed() => {
                             if res.is_err() {

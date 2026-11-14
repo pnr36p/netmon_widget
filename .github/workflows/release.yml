@@ -31,7 +31,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/netmon_widget.exe dist/netmon_widget.exe
-          Compress-Archive -Path dist/netmon_widget.exe, LICENSE, README.md, README.ru.md, netmon_widget.example.toml -DestinationPath dist/netmon_widget-win64.zip -Force
+          Compress-Archive -Path dist/netmon_widget.exe, LICENSE, README.md, README.ru.md, README.hr.md, netmon_widget.example.toml -DestinationPath dist/netmon_widget-win64.zip -Force
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

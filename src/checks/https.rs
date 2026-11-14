@@ -14,9 +14,9 @@ fn shared_http_client() -> Result<&'static reqwest::Client, String> {
     res.as_ref().map_err(|e| e.clone())
 }
 
-pub async fn check(host: &str, port: u16, use_https: bool, timeout: Duration) -> Result<(), String> {
+pub fn build_url(host: &str, port: u16, use_https: bool) -> String {
     let trimmed = host.trim();
-    let url = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         trimmed.to_string()
     } else {
         let scheme = if use_https || port == 443 || port == 8443 {
@@ -31,7 +31,18 @@ pub async fn check(host: &str, port: u16, use_https: bool, timeout: Duration) ->
         } else {
             format!("{}://{}:{}", scheme, trimmed, port)
         }
-    };
+    }
+}
+
+pub async fn check(
+    host: &str,
+    port: u16,
+    use_https: bool,
+    timeout: Duration,
+    expect_status: Option<u16>,
+    expect_text: Option<&str>,
+) -> Result<(), String> {
+    let url = build_url(host, port, use_https);
 
     let client = shared_http_client()?;
     let resp = client
@@ -40,9 +51,24 @@ pub async fn check(host: &str, port: u16, use_https: bool, timeout: Duration) ->
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    if resp.status().is_success() || resp.status().is_redirection() {
-        Ok(())
-    } else {
-        Err(format!("HTTP {}", resp.status()))
+
+    let status = resp.status();
+    let status_ok = match expect_status {
+        Some(code) => status.as_u16() == code,
+        None => status.is_success() || status.is_redirection(),
+    };
+    if !status_ok {
+        return Err(format!("HTTP {}", status));
     }
+
+    if let Some(needle) = expect_text.filter(|s| !s.is_empty()) {
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        let slice = &bytes[..bytes.len().min(512 * 1024)];
+        let body = String::from_utf8_lossy(slice);
+        if !body.contains(needle) {
+            return Err(format!("Missing text: {}", needle));
+        }
+    }
+
+    Ok(())
 }

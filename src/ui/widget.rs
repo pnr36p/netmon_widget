@@ -58,7 +58,10 @@ pub fn desired_widget_size(state: &AppState) -> Vec2 {
         + state
             .sections
             .iter()
-            .map(|sec| sz.header_height() + sec.checks.len() as f32 * sz.row_height())
+            .map(|sec| {
+                let rows = if sec.collapsed { 0.0 } else { sec.checks.len() as f32 };
+                sz.header_height() + rows * sz.row_height()
+            })
             .sum::<f32>()
         + 4.0;
     let h = state
@@ -158,6 +161,39 @@ pub fn apply_minimized_visibility(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
+fn extract_diag_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let authority = without_scheme.split('/').next().unwrap_or("").trim();
+    let host_only = if authority.starts_with('[') {
+        authority
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[')
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host_only.is_empty()
+        || !host_only
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+    {
+        return None;
+    }
+    Some(host_only.to_string())
+}
+
+fn spawn_console_diag(args: &[&str]) {
+    let _ = std::process::Command::new("cmd.exe")
+        .arg("/k")
+        .args(args)
+        .spawn();
+}
+
 pub fn handle_menu_action(
     act: crate::ui::menu::native::NativeMenuAction,
     ctx: &egui::Context,
@@ -184,6 +220,56 @@ pub fn handle_menu_action(
             {
                 let suffix = crate::i18n::tr(state.config.language).clone_suffix;
                 state.open_edit_host(EditHostState::clone_check(sec_idx, &chk, suffix));
+            }
+        }
+        NativeMenuAction::CopyHost(sec_idx, chk_idx) => {
+            if let Some(chk) = state
+                .sections
+                .get(sec_idx)
+                .and_then(|s| s.checks.get(chk_idx))
+            {
+                ctx.copy_text(chk.config.host.clone());
+            }
+        }
+        NativeMenuAction::OpenInBrowser(sec_idx, chk_idx) => {
+            if let Some(chk) = state
+                .sections
+                .get(sec_idx)
+                .and_then(|s| s.checks.get(chk_idx))
+            {
+                let url = crate::checks::https::build_url(
+                    &chk.config.host,
+                    chk.config.effective_port(),
+                    chk.config.base_kind() == "https",
+                );
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    let _ = std::process::Command::new("rundll32.exe")
+                        .arg("url.dll,FileProtocolHandler")
+                        .arg(&url)
+                        .spawn();
+                }
+            }
+        }
+        NativeMenuAction::DiagPing(sec_idx, chk_idx) => {
+            if let Some(chk) = state
+                .sections
+                .get(sec_idx)
+                .and_then(|s| s.checks.get(chk_idx))
+            {
+                if let Some(host) = extract_diag_host(&chk.config.host) {
+                    spawn_console_diag(&["ping", "-t", &host]);
+                }
+            }
+        }
+        NativeMenuAction::DiagTracert(sec_idx, chk_idx) => {
+            if let Some(chk) = state
+                .sections
+                .get(sec_idx)
+                .and_then(|s| s.checks.get(chk_idx))
+            {
+                if let Some(host) = extract_diag_host(&chk.config.host) {
+                    spawn_console_diag(&["tracert", &host]);
+                }
             }
         }
         NativeMenuAction::AddCheck(sec_idx) => {
@@ -230,7 +316,28 @@ pub fn handle_menu_action(
             state.scheduler_needs_sync = true;
         }
         NativeMenuAction::Refresh => {
+            state.polling_paused = false;
             state.manual_refresh_requested = true;
+        }
+        NativeMenuAction::TogglePause => {
+            state.polling_paused = !state.polling_paused;
+            if !state.polling_paused {
+                state.manual_refresh_requested = true;
+            }
+        }
+        NativeMenuAction::MuteForMinutes(mins) => {
+            if mins == 0 {
+                state.notifications_muted = false;
+                state.notifications_muted_until = None;
+            } else if mins == u64::MAX {
+                state.notifications_muted = true;
+                state.notifications_muted_until = None;
+            } else {
+                state.notifications_muted = false;
+                state.notifications_muted_until = Some(
+                    std::time::Instant::now() + std::time::Duration::from_secs(mins * 60),
+                );
+            }
         }
         NativeMenuAction::Settings => {
             state.open_settings();
@@ -275,6 +382,26 @@ pub fn handle_menu_action(
                 }
                 Err(e) => {
                     let s = crate::i18n::tr(state.config.language);
+                    state.pending_notifications.push_back(crate::state::TrayNotification {
+                        title: s.notify_csv_err_title.to_string(),
+                        body: e,
+                        level: crate::state::TrayNotifyLevel::Warning,
+                    });
+                }
+            }
+        }
+        NativeMenuAction::ExportCsv => {
+            let path = crate::config::network_csv_path();
+            let s = crate::i18n::tr(state.config.language);
+            match crate::config::export_network_csv(&path, &state.config.sections) {
+                Ok(()) => {
+                    state.pending_notifications.push_back(crate::state::TrayNotification {
+                        title: s.notify_csv_exported_title.to_string(),
+                        body: s.notify_csv_exported_body.to_string(),
+                        level: crate::state::TrayNotifyLevel::Info,
+                    });
+                }
+                Err(e) => {
                     state.pending_notifications.push_back(crate::state::TrayNotification {
                         title: s.notify_csv_err_title.to_string(),
                         body: e,
@@ -483,6 +610,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
     let refresh_rect = Rect::from_center_size(refresh_center, Vec2::new(15.0, 14.0));
     let refresh_resp = ui.interact(refresh_rect, ui.scope_id().with("gadget_refresh_btn"), Sense::click());
     if refresh_resp.clicked() {
+        state.polling_paused = false;
         state.manual_refresh_requested = true;
     }
 
@@ -515,22 +643,45 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
         state.is_user_dragging_window = true;
     }
 
-    let rotation_angle = if state.is_checking {
-        ui.input(|i| (i.time * 8.0) as f32)
-    } else {
-        0.0
-    };
-    draw_refresh_icon(
-        ui.painter(),
-        refresh_center,
-        4.5,
-        rotation_angle,
-        if refresh_resp.hovered() {
-            pal.refresh_hover
+    if state.polling_paused {
+        let pause_color = if refresh_resp.hovered() {
+            Color32::from_rgb(0xFF, 0xD6, 0x66)
         } else {
-            pal.refresh_idle
-        },
-    );
+            Color32::from_rgb(0xFF, 0xB8, 0x2E)
+        };
+        let bar_stroke = Stroke::new(2.0, pause_color);
+        ui.painter().line_segment(
+            [
+                Pos2::new(refresh_center.x - 2.2, refresh_center.y - 4.0),
+                Pos2::new(refresh_center.x - 2.2, refresh_center.y + 4.0),
+            ],
+            bar_stroke,
+        );
+        ui.painter().line_segment(
+            [
+                Pos2::new(refresh_center.x + 2.2, refresh_center.y - 4.0),
+                Pos2::new(refresh_center.x + 2.2, refresh_center.y + 4.0),
+            ],
+            bar_stroke,
+        );
+    } else {
+        let rotation_angle = if state.is_checking {
+            ui.input(|i| (i.time * 8.0) as f32)
+        } else {
+            0.0
+        };
+        draw_refresh_icon(
+            ui.painter(),
+            refresh_center,
+            4.5,
+            rotation_angle,
+            if refresh_resp.hovered() {
+                pal.refresh_hover
+            } else {
+                pal.refresh_idle
+            },
+        );
+    }
 
     // Заголовок после кнопки обновления, обрезается при узком окне перед кнопками справа
     let title_text = truncate_text(
@@ -599,6 +750,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
 
     let mut hovered_tooltip: Option<(CheckState, Rect)> = None;
     let mut pending_edit: Option<EditHostState> = None;
+    let mut pending_toggle_collapse: Option<usize> = None;
 
     enum DragSlot {
         SectionHeader(usize, Rect),
@@ -618,7 +770,9 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     Vec2::new(ui.available_width(), header_height),
                     Sense::click_and_drag(),
                 );
-                if header_resp.drag_started()
+                if header_resp.clicked() && press_in_interior && state.drag_state.is_none() {
+                    pending_toggle_collapse = Some(sec_idx);
+                } else if header_resp.drag_started()
                     && primary_down
                     && state.drag_state.is_none()
                     && state.active_resize.is_none()
@@ -654,6 +808,14 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     );
                 }
 
+                ui.painter().text(
+                    Pos2::new(header_rect.left() + 5.0, header_rect.center().y),
+                    Align2::LEFT_CENTER,
+                    if section.collapsed { "▸" } else { "▾" },
+                    FontId::proportional((header_fs - 1.0).max(8.0)),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 200),
+                );
+
                 // Белый текст строго по центру
                 ui.painter().text(
                     header_rect.center(),
@@ -663,77 +825,156 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                     Color32::WHITE,
                 );
 
+                if section.collapsed && !section.checks.is_empty() {
+                    let mut has_crit_err = false;
+                    let mut has_warn = false;
+                    for ch in &section.checks {
+                        match &ch.result {
+                            Some(r) if r.ok => {
+                                if ch.is_high_latency() {
+                                    has_warn = true;
+                                }
+                            }
+                            Some(_) => {
+                                if ch.config.is_optional() {
+                                    has_warn = true;
+                                } else {
+                                    has_crit_err = true;
+                                }
+                            }
+                            None => has_warn = true,
+                        }
+                    }
+                    let dot_color = if has_crit_err {
+                        Color32::from_rgb(0xFA, 0x24, 0x24)
+                    } else if has_warn {
+                        Color32::from_rgb(0xFF, 0xCA, 0x18)
+                    } else {
+                        Color32::from_rgb(0x32, 0xD7, 0x3C)
+                    };
+                    ui.painter().circle_filled(
+                        Pos2::new(header_rect.right() - 8.0, header_rect.center().y),
+                        3.0,
+                        dot_color,
+                    );
+                }
+
                 drag_slots.push(DragSlot::SectionHeader(sec_idx, header_rect));
                 let mut sec_full_rect = header_rect;
 
                 // Строки хостов
-                for (chk_idx, check) in section.checks.iter().enumerate() {
-                    let (row_rect, row_resp) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), row_height),
-                        Sense::click_and_drag(),
-                    );
-
-                    sec_full_rect = sec_full_rect.union(row_rect);
-                    drag_slots.push(DragSlot::Check(sec_idx, chk_idx, row_rect));
-
-                    if row_resp.double_clicked() && press_in_interior {
-                        pending_edit = Some(EditHostState::from_check(sec_idx, chk_idx, check));
-                    } else if row_resp.drag_started()
-                        && primary_down
-                        && state.drag_state.is_none()
-                        && state.active_resize.is_none()
-                        && press_in_interior
-                    {
-                        state.drag_state = Some(DragPayload::Check { sec_idx, chk_idx });
-                    }
-
-                    let is_dragged_row =
-                        state.drag_state == Some(DragPayload::Check { sec_idx, chk_idx });
-
-                    if is_dragged_row {
-                        ui.painter().rect_filled(row_rect, 0.0, pal.row_drag);
-                        ui.painter().rect_stroke(
-                            row_rect,
-                            0.0,
-                            Stroke::new(1.0, pal.title_blue),
-                            egui::StrokeKind::Inside,
+                if !section.collapsed {
+                    for (chk_idx, check) in section.checks.iter().enumerate() {
+                        let (row_rect, row_resp) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), row_height),
+                            Sense::click_and_drag(),
                         );
-                    } else if row_resp.hovered()
-                        && state.drag_state.is_none()
-                        && state.active_resize.is_none()
-                        && hover_in_interior
-                    {
-                        ui.painter().rect_filled(row_rect, 0.0, pal.row_hover);
-                        hovered_tooltip = Some((check.clone(), row_rect));
-                    }
 
-                    // Имя хоста слева (с отступом x = 9px)
-                    let max_text_width = (row_rect.width() - 32.0).max(20.0);
-                    let display_name =
-                        truncate_text(ui.painter(), &check.config.name, max_text_width, fs);
+                        sec_full_rect = sec_full_rect.union(row_rect);
+                        drag_slots.push(DragSlot::Check(sec_idx, chk_idx, row_rect));
 
-                    ui.painter().text(
-                        Pos2::new(row_rect.left() + 9.0, row_rect.center().y),
-                        Align2::LEFT_CENTER,
-                        display_name,
-                        FontId::proportional(fs),
-                        pal.host_text,
-                    );
+                        if row_resp.double_clicked() && press_in_interior {
+                            pending_edit = Some(EditHostState::from_check(sec_idx, chk_idx, check));
+                        } else if row_resp.drag_started()
+                            && primary_down
+                            && state.drag_state.is_none()
+                            && state.active_resize.is_none()
+                            && press_in_interior
+                        {
+                            state.drag_state = Some(DragPayload::Check { sec_idx, chk_idx });
+                        }
 
-                    // 3D-иконка статуса справа
-                    let icon_center = Pos2::new(row_rect.right() - 13.0, row_rect.center().y);
-                    match &check.result {
-                        Some(res) if res.ok => {
-                            draw_glossy_checkmark(ui.painter(), icon_center);
+                        let is_dragged_row =
+                            state.drag_state == Some(DragPayload::Check { sec_idx, chk_idx });
+
+                        if is_dragged_row {
+                            ui.painter().rect_filled(row_rect, 0.0, pal.row_drag);
+                            ui.painter().rect_stroke(
+                                row_rect,
+                                0.0,
+                                Stroke::new(1.0, pal.title_blue),
+                                egui::StrokeKind::Inside,
+                            );
+                        } else if row_resp.hovered()
+                            && state.drag_state.is_none()
+                            && state.active_resize.is_none()
+                            && hover_in_interior
+                        {
+                            ui.painter().rect_filled(row_rect, 0.0, pal.row_hover);
+                            hovered_tooltip = Some((check.clone(), row_rect));
                         }
-                        Some(_res) if check.config.is_optional() => {
-                            draw_glossy_optional_offline(ui.painter(), icon_center);
+
+                        let lat_fs = (fs - 1.5).max(8.5);
+                        let latency_label =
+                            if state.config.show_latency_in_list && row_rect.width() >= 145.0 {
+                                check.result.as_ref().and_then(|r| {
+                                    if r.ok {
+                                        r.latency_ms.map(|ms| format!("{}ms", ms))
+                                    } else {
+                                        None
+                                    }
+                                })
+                            } else {
+                                None
+                            };
+                        let lat_width = if let Some(ref lbl) = latency_label {
+                            ui.painter()
+                                .layout_no_wrap(lbl.clone(), FontId::proportional(lat_fs), pal.host_text)
+                                .size()
+                                .x
+                                + 6.0
+                        } else {
+                            0.0
+                        };
+
+                        // Имя хоста слева (с отступом x = 9px)
+                        let max_text_width = (row_rect.width() - 32.0 - lat_width).max(20.0);
+                        let display_name =
+                            truncate_text(ui.painter(), &check.config.name, max_text_width, fs);
+
+                        ui.painter().text(
+                            Pos2::new(row_rect.left() + 9.0, row_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            display_name,
+                            FontId::proportional(fs),
+                            pal.host_text,
+                        );
+
+                        if let Some(lbl) = latency_label {
+                            let lat_color = if check.is_high_latency() {
+                                Color32::from_rgb(0xFF, 0xCA, 0x18)
+                            } else if is_dark {
+                                Color32::from_rgb(0x9A, 0xA2, 0xAE)
+                            } else {
+                                Color32::from_rgb(0x64, 0x6D, 0x7A)
+                            };
+                            ui.painter().text(
+                                Pos2::new(row_rect.right() - 24.0, row_rect.center().y),
+                                Align2::RIGHT_CENTER,
+                                lbl,
+                                FontId::proportional(lat_fs),
+                                lat_color,
+                            );
                         }
-                        Some(_res) => {
-                            draw_glossy_cross(ui.painter(), icon_center);
-                        }
-                        None => {
-                            draw_pending_icon(ui.painter(), icon_center);
+
+                        // 3D-иконка статуса справа
+                        let icon_center = Pos2::new(row_rect.right() - 13.0, row_rect.center().y);
+                        match &check.result {
+                            Some(res) if res.ok && check.is_high_latency() => {
+                                draw_glossy_optional_offline(ui.painter(), icon_center);
+                            }
+                            Some(res) if res.ok => {
+                                draw_glossy_checkmark(ui.painter(), icon_center);
+                            }
+                            Some(_res) if check.config.is_optional() => {
+                                draw_glossy_optional_offline(ui.painter(), icon_center);
+                            }
+                            Some(_res) => {
+                                draw_glossy_cross(ui.painter(), icon_center);
+                            }
+                            None => {
+                                draw_pending_icon(ui.painter(), icon_center);
+                            }
                         }
                     }
                 }
@@ -741,6 +982,16 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                 section_bounds.push((sec_idx, header_rect, sec_full_rect));
             }
         });
+
+    if let Some(sec_idx) = pending_toggle_collapse {
+        state.toggle_section_collapsed(sec_idx);
+        if state.config.custom_height.is_none() && !state.minimized_to_tray {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::InnerSize(desired_widget_size(state)),
+            );
+        }
+    }
 
     // Обработка живого перетаскивания элементов и групп в реальном времени
     if let Some(drag) = state.drag_state {
@@ -921,6 +1172,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                         _ => None,
                     });
 
+                    let muted = state.is_notifications_muted();
                     let menu_opts = crate::ui::menu::native::PopupMenuState {
                         lang: state.config.language,
                         is_dark,
@@ -932,10 +1184,16 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                             crate::updater::UpdateStatus::ReadyToRestart(_)
                         ),
                         interval_sec: state.config.interval_sec,
+                        paused: state.polling_paused,
+                        muted,
                     };
                     let action = if let Some((si, ci)) = hit_check {
                         let name = state.sections[si].checks[ci].config.name.clone();
                         let sec_name = state.sections[si].name.clone();
+                        let is_http = matches!(
+                            state.sections[si].checks[ci].config.base_kind(),
+                            "http" | "https"
+                        );
                         crate::ui::menu::native::show_popup(
                             menu_opts,
                             crate::ui::menu::native::MenuTarget::Check {
@@ -943,6 +1201,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut AppState) {
                                 chk_idx: ci,
                                 name: &name,
                                 sec_name: &sec_name,
+                                is_http,
                             },
                         )
                     } else if let Some(si) = hit_section {

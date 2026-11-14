@@ -1,6 +1,6 @@
 # NetMon Widget
 
-> **English** | [Русский](README.ru.md)
+> **English** | [Русский](README.ru.md) | [Hrvatski](README.hr.md)
 
 A lightweight desktop network monitoring widget for Windows inspired by the classic Windows 7 **Network Monitor Gadget** by Sam Tucker. Built in Rust using `eframe` / `egui` and native Win32 APIs (system tray, balloon notifications, floating tooltip, owner-drawn dark/light context menu).
 
